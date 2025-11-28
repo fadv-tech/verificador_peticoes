@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
+import { exec } from "child_process";
 import fs from "fs";
 
 const app = express();
@@ -46,6 +47,7 @@ function initDB() {
       usuario_projudi TEXT,
       navegador_modo TEXT,
       host_execucao TEXT,
+      max_robots INTEGER,
       total_arquivos INTEGER,
       total_protocolizadas INTEGER,
       total_nao_encontradas INTEGER,
@@ -68,6 +70,12 @@ function initDB() {
       valor TEXT NOT NULL
     )`);
 
+    db.exec(`CREATE TABLE IF NOT EXISTS credenciais (
+      usuario TEXT PRIMARY KEY,
+      senha TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`);
+
     const vcols = db.prepare("PRAGMA table_info(verificacoes)").all().map(r => r.name);
     if (!vcols.includes("usuario_projudi")) db.exec("ALTER TABLE verificacoes ADD COLUMN usuario_projudi TEXT DEFAULT ''");
     if (!vcols.includes("navegador_modo")) db.exec("ALTER TABLE verificacoes ADD COLUMN navegador_modo TEXT DEFAULT ''");
@@ -76,12 +84,27 @@ function initDB() {
 
     const lcols = db.prepare("PRAGMA table_info(logs_verificacao)").all().map(r => r.name);
     if (!lcols.includes("batch_id")) db.exec("ALTER TABLE logs_verificacao ADD COLUMN batch_id TEXT");
+    if (!lcols.includes("worker_id")) db.exec("ALTER TABLE logs_verificacao ADD COLUMN worker_id TEXT");
 
     const ecols = db.prepare("PRAGMA table_info(execucoes)").all().map(r => r.name);
     if (!ecols.includes("status")) db.exec("ALTER TABLE execucoes ADD COLUMN status TEXT DEFAULT 'pending'");
     if (!ecols.includes("progress")) db.exec("ALTER TABLE execucoes ADD COLUMN progress INTEGER DEFAULT 0");
     if (!ecols.includes("heartbeat_at")) db.exec("ALTER TABLE execucoes ADD COLUMN heartbeat_at TIMESTAMP");
+    if (!ecols.includes("max_robots")) db.exec("ALTER TABLE execucoes ADD COLUMN max_robots INTEGER");
     db.exec("UPDATE execucoes SET status='queued' WHERE status='pending' AND finalizado_em IS NULL");
+
+    try {
+      const urow = db.prepare("SELECT valor FROM config WHERE chave='PROJUDI_USERNAME'").get();
+      const prow = db.prepare("SELECT valor FROM config WHERE chave='PROJUDI_PASSWORD'").get();
+      const uenv = process.env.PROJUDI_USERNAME || "";
+      const penv = process.env.PROJUDI_PASSWORD || "";
+      if (uenv && !urow) db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_USERNAME', ?)").run(uenv);
+      if (penv && !prow) db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_PASSWORD', ?)").run(penv);
+      const haveCreds = db.prepare("SELECT COUNT(*) as c FROM credenciais").get().c;
+      const cu = (urow && urow.valor) || uenv;
+      const cp = (prow && prow.valor) || penv;
+      if (!haveCreds && cu && cp) db.prepare("INSERT OR REPLACE INTO credenciais (usuario, senha) VALUES (?, ?)").run(cu, cp);
+    } catch {}
   } catch (e) {
     console.error("Falha ao inicializar DB:", e);
   }
@@ -289,6 +312,84 @@ function parseCNJAndId(name) {
   return { numero_processo, identificador };
 }
 
+const isWindows = process.platform === 'win32';
+
+function listActiveRobots() {
+  return new Promise((resolve) => {
+    if (!isWindows) return resolve([]);
+    const ps = spawn('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process | Select-Object ProcessId, Name, CommandLine | ConvertTo-Json"], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    ps.stdout.on('data', (d) => { out += d.toString(); });
+    ps.on('close', () => {
+      try {
+        let data = [];
+        const jsonStart = out.indexOf('[') >= 0 ? out.slice(out.indexOf('[')) : out;
+        data = JSON.parse(jsonStart);
+        const rows = (Array.isArray(data) ? data : [data]).filter(r => {
+          const cl = String(r.CommandLine || '').toLowerCase();
+          return cl.includes('verificador_peticoes') || cl.includes('worker.py') || cl.includes('projudi');
+        }).map(r => ({ pid: r.ProcessId, name: r.Name, cmd: r.CommandLine }));
+        resolve(rows);
+      } catch {
+        resolve([]);
+      }
+    });
+    ps.on('error', () => resolve([]));
+  });
+}
+
+function killPIDs(pids = []) {
+  return new Promise((resolve) => {
+    if (!isWindows || !pids.length) return resolve({ killed: 0 });
+    let killed = 0;
+    let pending = pids.length;
+    pids.forEach((pid) => {
+      const k = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore' });
+      k.on('close', () => { killed++; if (--pending === 0) resolve({ killed }); });
+      k.on('error', () => { if (--pending === 0) resolve({ killed }); });
+    });
+  });
+}
+
+app.get('/robots', async (req, res) => {
+  try {
+    const rows = await listActiveRobots();
+    res.json({ ok: true, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/robots/kill', async (req, res) => {
+  try {
+    const aggressive = true; // sempre agressivo por enquanto
+    const rows = await listActiveRobots();
+    let targets = rows;
+    if (!aggressive) targets = rows.filter(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+    const { killed } = await killPIDs(targets.map(r => r.pid));
+    // Marcar execuções como finalizadas/erro
+    try {
+      db.exec("UPDATE job_items SET status='failed', mensagem='Finalização global' WHERE status IN ('pending','running')");
+      db.exec("UPDATE execucoes SET status='error', finalizado_em=CURRENT_TIMESTAMP WHERE finalizado_em IS NULL");
+      db.prepare("INSERT INTO logs_verificacao (nivel,mensagem,detalhes,batch_id) VALUES ('ERROR','Finalização agressiva','robots/kill', '')").run();
+    } catch {}
+    res.json({ ok: true, killed });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/robots/kill-workers', async (req, res) => {
+  try {
+    const rows = await listActiveRobots();
+    const targets = rows.filter(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+    const { killed } = await killPIDs(targets.map(r => r.pid));
+    res.json({ ok: true, killed });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 function nodeBackupReset() {
   const baseDir = path.resolve(__dirname, "..", "verificador_peticoes", "data");
   const backups = path.join(baseDir, "backups");
@@ -301,23 +402,35 @@ function nodeBackupReset() {
     db.exec("DROP TABLE IF EXISTS logs_verificacao;");
     db.exec("DROP TABLE IF EXISTS execucoes;");
     db.exec("DROP TABLE IF EXISTS job_items;");
-    db.exec("DROP TABLE IF EXISTS config;");
+    // preservar credenciais em 'config'
   } catch {}
   initDB();
   return backupPath;
 }
-function spawnWorkerDetached() {
+function spawnWorkerDetached(batchId = "") {
   const script = path.resolve(__dirname, "..", "verificador_peticoes", "src", "worker.py");
   const pyCwd = path.resolve(__dirname, "..", "verificador_peticoes");
   let child;
-  const opts = { detached: true, stdio: "ignore", windowsHide: true, cwd: pyCwd };
-  try { child = spawn("pythonw", [script], opts); } catch {}
-  if (!child) { try { child = spawn("py", ["-3", script], opts); } catch {} }
-  if (!child) { try { child = spawn("python", [script], opts); } catch {} }
-  if (!child) { try { child = spawn("python3", [script], opts); } catch {} }
+  const workerId = `w-${Date.now().toString(36)}-${Math.random().toString(16).slice(2,6)}`;
+  const opts = { detached: true, stdio: "ignore", windowsHide: true, cwd: pyCwd, env: { ...process.env, WORKER_ID: workerId } };
+  const args = batchId ? [script, "--batch", batchId] : [script];
+  try { child = spawn("pythonw", args, opts); } catch {}
+  if (!child) { try { child = spawn("py", ["-3", ...args], opts); } catch {} }
+  if (!child) { try { child = spawn("python", args, opts); } catch {} }
+  if (!child) { try { child = spawn("python3", args, opts); } catch {} }
   if (!child) return false;
   child.unref();
   return true;
+}
+
+function spawnWorkersForBatch(batchId, robots = 1) {
+  const n = Math.max(1, Math.min(robots || 1, 10));
+  let okAny = false;
+  for (let i = 0; i < n; i++) {
+    const ok = spawnWorkerDetached(batchId);
+    okAny = okAny || ok;
+  }
+  return okAny;
 }
 
 app.post("/enqueue", (req, res) => {
@@ -325,11 +438,28 @@ app.post("/enqueue", (req, res) => {
     const files = Array.isArray(req.body.files) ? req.body.files : [];
     if (!files.length) return res.status(400).json({ ok: false, error: "files vazio" });
     const batch = (Math.random().toString(16).slice(2, 10));
-    const usuarioRow = db.prepare("SELECT valor FROM config WHERE chave='PROJUDI_USERNAME'").get();
-    const usuario = usuarioRow ? usuarioRow.valor : "";
+    const usuarioSel = String(req.body.usuario || '').trim();
+    let usuario = usuarioSel;
+    if (!usuario) {
+      const usuarioRow = db.prepare("SELECT valor FROM config WHERE chave='PROJUDI_USERNAME'").get();
+      usuario = usuarioRow ? usuarioRow.valor : "";
+    }
     const host = process.env.COMPUTERNAME || process.env.HOSTNAME || "";
+    let modo = String(req.body.mode || '').toLowerCase();
+    if (modo !== 'visible') modo = 'headless';
+    const robots = Math.max(1, parseInt(String(req.body.robots || '1'), 10) || 1);
     db.prepare("INSERT OR REPLACE INTO execucoes (batch_id, iniciado_em, usuario_projudi, navegador_modo, host_execucao, total_arquivos, status, progress) VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, 'queued', 0)")
-      .run(batch, usuario, 'headless', host, files.length);
+      .run(batch, usuario, modo, host, files.length);
+    if (usuarioSel) {
+      try {
+        const prow = db.prepare("SELECT senha FROM credenciais WHERE usuario=?").get(usuarioSel);
+        if (prow && prow.senha) {
+          db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_USERNAME', ?)").run(usuarioSel);
+          db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_PASSWORD', ?)").run(prow.senha);
+        }
+      } catch {}
+    }
+    try { db.prepare("UPDATE execucoes SET max_robots=? WHERE batch_id=?").run(robots, batch); } catch {}
     const stmt = db.prepare("INSERT INTO job_items (batch_id, nome_arquivo, numero_processo, identificador, status, mensagem) VALUES (?, ?, ?, ?, 'pending', '')");
     let inserted = 0;
     for (const f of files) {
@@ -339,11 +469,31 @@ app.post("/enqueue", (req, res) => {
       stmt.run(batch, s, numero_processo, identificador);
       inserted++;
     }
-    const running = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status='running' AND finalizado_em IS NULL").get().c;
-    if (running === 0) {
-      try { spawnWorkerDetached(); } catch {}
-    }
+    try { spawnWorkersForBatch(batch, robots); } catch {}
     res.json({ ok: true, batch_id: batch, count: inserted });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post("/config/credenciais", (req, res) => {
+  try {
+    const usuario = String(req.body.usuario || '').trim();
+    const senha = String(req.body.senha || '').trim();
+    if (!usuario || !senha) return res.status(400).json({ ok: false, error: 'Credenciais inválidas' });
+    db.prepare("INSERT OR REPLACE INTO credenciais (usuario, senha) VALUES (?,?)").run(usuario, senha);
+    db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_USERNAME', ?)").run(usuario);
+    db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_PASSWORD', ?)").run(senha);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/config/usuarios", (req, res) => {
+  try {
+    const rows = db.prepare("SELECT usuario FROM credenciais ORDER BY usuario").all();
+    res.json({ ok: true, usuarios: rows.map(r => r.usuario) });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }

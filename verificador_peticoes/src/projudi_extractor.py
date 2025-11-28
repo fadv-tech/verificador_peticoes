@@ -59,12 +59,31 @@ class ProjudiExtractor:
             self.page.locator("#login").fill(usuario)
             self.page.locator("#senha").fill(senha)
             self.logger.info("Submetendo login")
-            self.page.locator("[name='entrar']").click()
+            try:
+                self.page.evaluate("""
+                    () => {
+                        const ov = document.querySelector('.ui-widget-overlay.ui-front');
+                        if (ov) ov.remove();
+                    }
+                """)
+            except Exception:
+                pass
+            self.page.locator("[name='entrar']").click(force=True, no_wait_after=True)
             try:
                 self.page.wait_for_selector("iframe[name='userMainFrame']", timeout=20000)
                 self.logger.info("Frame principal disponível")
             except PWTimeoutError:
-                pass
+                try:
+                    self.page.locator("[name='entrar']").click(force=True, no_wait_after=True)
+                    self.page.wait_for_selector("iframe[name='userMainFrame']", timeout=20000)
+                    self.logger.info("Frame principal disponível")
+                except Exception:
+                    try:
+                        self.page.locator("#senha").press("Enter")
+                        self.page.wait_for_selector("iframe[name='userMainFrame']", timeout=20000)
+                        self.logger.info("Frame principal disponível")
+                    except Exception:
+                        pass
             time.sleep(1)
             self.logger.info("Login realizado")
             try:
@@ -83,18 +102,250 @@ class ProjudiExtractor:
     def pesquisar_processo(self, numero_processo: str) -> bool:
         try:
             self.logger.info(f"Abrindo busca do processo {numero_processo}")
-            self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso?PaginaAtual=4", wait_until="domcontentloaded")
-            campo = self.page.locator("#ProcessoNumero")
+            try:
+                self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso?PaginaAtual=4", wait_until="domcontentloaded")
+            except Exception:
+                try:
+                    if getattr(self, 'page', None) and self.page.is_closed():
+                        self.page = self.context.new_page()
+                    self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso?PaginaAtual=4", wait_until="domcontentloaded")
+                except Exception:
+                    self.logger.error("Falha ao abrir busca de processo")
+                    return False
+            frame = self.page.frame(name="userMainFrame")
+            base = frame if frame else self.page
+            campo = base.locator("#ProcessoNumero")
             campo.fill("")
             campo.fill(numero_processo)
             self.logger.info("Campo preenchido")
             try:
-                self.page.locator("[name='imaLimparProcessoStatus']").click()
+                base.locator("[name='imaLimparProcessoStatus']").wait_for(state="visible", timeout=5000)
+                base.locator("[name='imaLimparProcessoStatus']").click()
+            except Exception:
+                try:
+                    (frame or self.page).evaluate("""
+                        () => {
+                            const btn = document.querySelector('[name="imaLimparProcessoStatus"]');
+                            try { if (btn) btn.click(); } catch(e) {}
+                            ['Id_ProcessoStatus','ProcessoStatusCodigo','ProcessoStatus'].forEach(id => {
+                                const el = document.getElementById(id);
+                                if (el) el.value = '';
+                            });
+                        }
+                    """)
+                except Exception:
+                    pass
+            try:
+                (frame or self.page).evaluate("""
+                    () => {
+                        const ov = document.querySelector('.ui-widget-overlay.ui-front');
+                        if (ov) ov.remove();
+                    }
+                """)
             except Exception:
                 pass
-            self.page.locator("[name='imgSubmeter']").click()
+            base.locator("[name='imgSubmeter']").click(force=True, no_wait_after=True)
+            try:
+                campo.press("Enter")
+            except Exception:
+                pass
+            try:
+                self.page.wait_for_load_state("networkidle")
+            except Exception:
+                pass
             self.logger.info("Submetendo busca")
-            self.page.wait_for_selector("#span_proc_numero", timeout=20000)
+            ok = False
+            try:
+                try:
+                    (frame or self.page).wait_for_selector("#span_proc_numero", timeout=8000)
+                    ok = True
+                except Exception:
+                    (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=8000)
+                    ok = True
+            except PWTimeoutError:
+                pass
+            if not ok:
+                try:
+                    self.logger.info("Tentando localizar link do processo pelo número")
+                    alvo = base.locator(f"text={numero_processo}")
+                    if alvo.count() > 0:
+                        alvo.first.click()
+                        try:
+                            if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                self.page = self.context.pages[-1]
+                                frame = self.page.frame(name="userMainFrame")
+                        except Exception:
+                            pass
+                        try:
+                            (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                            ok = True
+                        except Exception:
+                            (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                            ok = True
+                except Exception:
+                    pass
+            if not ok:
+                try:
+                    self.logger.info("Tentando abrir link de VisualizarProcesso")
+                    link = base.locator("a[href*='VisualizarProcesso']")
+                    if link.count() > 0:
+                        link.first.click()
+                        try:
+                            if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                self.page = self.context.pages[-1]
+                                frame = self.page.frame(name="userMainFrame")
+                        except Exception:
+                            pass
+                        try:
+                            (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                            ok = True
+                        except Exception:
+                            (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                            ok = True
+                except Exception:
+                    pass
+            if not ok:
+                try:
+                    self.logger.info("Tentando abrir link por título Visualizar")
+                    v = base.locator("a[title*='Visualizar']")
+                    if v.count() > 0:
+                        v.first.click()
+                        try:
+                            if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                self.page = self.context.pages[-1]
+                                frame = self.page.frame(name="userMainFrame")
+                        except Exception:
+                            pass
+                        try:
+                            (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                            ok = True
+                        except Exception:
+                            (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                            ok = True
+                except Exception:
+                    pass
+            if not ok:
+                try:
+                    self.logger.info("Tentando clicar linha com número do processo")
+                    row = base.locator("tr", has_text=numero_processo)
+                    if row.count() > 0:
+                        a2 = row.first.locator("a[href*='VisualizarProcesso']")
+                        if a2.count() > 0:
+                            a2.first.click()
+                            try:
+                                if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                    self.page = self.context.pages[-1]
+                                    frame = self.page.frame(name="userMainFrame")
+                            except Exception:
+                                pass
+                            try:
+                                (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                                ok = True
+                            except Exception:
+                                (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                ok = True
+                except Exception:
+                    pass
+            if not ok:
+                try:
+                    self.logger.info("Verificando conteúdo dentro de userMainFrame")
+                    frame = self.page.frame(name="userMainFrame")
+                    if frame:
+                        try:
+                            alvo_f = frame.locator(f"text={numero_processo}")
+                            if alvo_f.count() > 0:
+                                alvo_f.first.click()
+                                try:
+                                    if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                        self.page = self.context.pages[-1]
+                                        frame = self.page.frame(name="userMainFrame")
+                                except Exception:
+                                    pass
+                                try:
+                                    frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    ok = True
+                                except Exception:
+                                    frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    ok = True
+                        except Exception:
+                            pass
+                        if not ok:
+                            try:
+                                link_f = frame.locator("a[href*='VisualizarProcesso']")
+                                if link_f.count() > 0:
+                                    link_f.first.click()
+                                    try:
+                                        if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                            self.page = self.context.pages[-1]
+                                            frame = self.page.frame(name="userMainFrame")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                        ok = True
+                                    except Exception:
+                                        frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                        ok = True
+                            except Exception:
+                                pass
+                        if not ok:
+                            try:
+                                v_f = frame.locator("a[title*='Visualizar']")
+                                if v_f.count() > 0:
+                                    v_f.first.click()
+                                    try:
+                                        if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                            self.page = self.context.pages[-1]
+                                            frame = self.page.frame(name="userMainFrame")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                        ok = True
+                                    except Exception:
+                                        frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                        ok = True
+                            except Exception:
+                                pass
+                        if not ok:
+                            try:
+                                row_f = frame.locator("tr", has_text=numero_processo)
+                                if row_f.count() > 0:
+                                    a2f = row_f.first.locator("a[href*='VisualizarProcesso']")
+                                    if a2f.count() > 0:
+                                        a2f.first.click()
+                                        try:
+                                            if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
+                                                self.page = self.context.pages[-1]
+                                                frame = self.page.frame(name="userMainFrame")
+                                        except Exception:
+                                            pass
+                                        try:
+                                            frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                            ok = True
+                                        except Exception:
+                                            frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                            ok = True
+                            except Exception:
+                                pass
+                        try:
+                            frame.wait_for_selector("#span_proc_numero", timeout=8000)
+                            ok = True
+                        except Exception:
+                            try:
+                                frame.wait_for_selector("tr.filtro-entrada", timeout=8000)
+                                ok = True
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            if not ok:
+                try:
+                    self.snapshot("falha_abrir_processo")
+                except Exception:
+                    pass
+                self.logger.error("Não foi possível abrir a página do processo")
+                return False
             self.logger.info("Página do processo carregada")
             time.sleep(1)
             try:
@@ -115,21 +366,339 @@ class ProjudiExtractor:
         
         try:
             # Acessa página de busca do processo
-            self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso", wait_until="domcontentloaded")
+            try:
+                self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso", wait_until="domcontentloaded")
+            except Exception:
+                try:
+                    if getattr(self, 'page', None) and self.page.is_closed():
+                        self.page = self.context.new_page()
+                    self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso", wait_until="domcontentloaded")
+                except Exception:
+                    self.logger.error("Falha ao abrir página de busca de processo")
+                    return []
             self.logger.info("Página de busca aberta")
             
             # Aguarda e preenche campo de busca
-            campo = self.page.locator("#ProcessoNumero")
+            frame = self.page.frame(name="userMainFrame")
+            base = frame if frame else self.page
+            campo = base.locator("#ProcessoNumero")
             campo.fill("")
             campo.fill(numero_processo)
             self.logger.info("Número do processo preenchido")
+            try:
+                base.locator("[name='imaLimparProcessoStatus']").wait_for(state="visible", timeout=5000)
+                base.locator("[name='imaLimparProcessoStatus']").click()
+            except Exception:
+                try:
+                    (frame or self.page).evaluate("""
+                        () => {
+                            try {
+                                if (typeof LimparChaveEstrangeira === 'function') {
+                                    LimparChaveEstrangeira('Id_ProcessoStatus','ProcessoStatus');
+                                    LimparChaveEstrangeira('ProcessoStatusCodigo','ProcessoStatus');
+                                }
+                            } catch (e) {}
+                            const btn = document.querySelector('[name="imaLimparProcessoStatus"]');
+                            try { if (btn) btn.click(); } catch(e) {}
+                            ['Id_ProcessoStatus','ProcessoStatusCodigo','ProcessoStatus'].forEach(id => {
+                                const el = document.getElementById(id);
+                                if (el) el.value = '';
+                            });
+                        }
+                    """)
+                except Exception:
+                    pass
+            time.sleep(0.2)
             
             # Clica no botão de busca
-            self.page.locator("[name='imgSubmeter']").click()
+            try:
+                self.page.evaluate("""
+                    () => {
+                        const ov = document.querySelector('.ui-widget-overlay.ui-front');
+                        if (ov) ov.remove();
+                    }
+                """)
+            except Exception:
+                pass
+            base.locator("[name='imgSubmeter']").click(force=True, no_wait_after=True)
+            try:
+                self.page.wait_for_load_state("networkidle")
+            except Exception:
+                pass
+            time.sleep(1)
+            frame = self.page.frame(name="userMainFrame")
+            base = frame if frame else self.page
             self.logger.info("Busca submetida")
             
-            # Aguarda carregar resultado
-            self.page.wait_for_selector("#span_proc_numero", timeout=20000)
+            carregado = False
+            try:
+                try:
+                    (frame or self.page).wait_for_selector("#span_proc_numero", timeout=8000)
+                    carregado = True
+                except Exception:
+                    (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=8000)
+                    carregado = True
+            except PWTimeoutError:
+                pass
+            if not carregado:
+                try:
+                    self.logger.info("Tentando localizar link do processo pelo número")
+                    try:
+                        base.wait_for_selector(f"text={numero_processo}", timeout=12000)
+                    except Exception:
+                        pass
+                    alvo = base.locator(f"text={numero_processo}")
+                    if alvo.count() > 0:
+                        alvo.first.click()
+                        try:
+                            (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                            carregado = True
+                        except Exception:
+                            (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                            carregado = True
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Tentando abrir link de VisualizarProcesso")
+                    try:
+                        base.wait_for_selector("a[href*='VisualizarProcesso']", timeout=12000)
+                    except Exception:
+                        pass
+                    link = base.locator("a[href*='VisualizarProcesso']")
+                    if link.count() > 0:
+                        link.first.click()
+                        try:
+                            (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                            carregado = True
+                        except Exception:
+                            (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                            carregado = True
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Tentando abrir link por título Visualizar")
+                    try:
+                        base.wait_for_selector("a[title*='Visualizar']", timeout=12000)
+                    except Exception:
+                        pass
+                    v = base.locator("a[title*='Visualizar']")
+                    if v.count() > 0:
+                        v.first.click()
+                        try:
+                            (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                            carregado = True
+                        except Exception:
+                            (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                            carregado = True
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Tentando abrir link por texto normalizado")
+                    import re
+                    alvo = re.sub(r"\D", "", numero_processo)
+                    links = base.locator("a[href*='Visualizar']")
+                    cnt = links.count()
+                    for k in range(cnt):
+                        try:
+                            t = links.nth(k).inner_text() or ""
+                            if re.sub(r"\D", "", t) == alvo:
+                                links.nth(k).click()
+                                (frame or self.page).wait_for_selector("#span_proc_numero", timeout=20000)
+                                carregado = True
+                                break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Varredura em todos os frames por link do processo")
+                    for fr in getattr(self.page, 'frames', []):
+                        if carregado:
+                            break
+                        try:
+                            alvo_t = fr.locator(f"text={numero_processo}")
+                            if alvo_t.count() > 0:
+                                alvo_t.first.click()
+                                try:
+                                    fr.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    fr.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            link_t = fr.locator("a[href*='VisualizarProcesso']")
+                            if link_t.count() > 0:
+                                link_t.first.click()
+                                try:
+                                    fr.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    fr.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            v_t = fr.locator("a[title*='Visualizar']")
+                            if v_t.count() > 0:
+                                v_t.first.click()
+                                try:
+                                    fr.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    fr.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                                break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Tentando clicar linha com número do processo")
+                    row = base.locator("tr", has_text=numero_processo)
+                    if row.count() > 0:
+                        a2 = row.first.locator("a[href*='VisualizarProcesso']")
+                        if a2.count() > 0:
+                            a2.first.click()
+                            try:
+                                (frame or self.page).wait_for_selector("#span_proc_numero", timeout=12000)
+                                carregado = True
+                            except Exception:
+                                (frame or self.page).wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                carregado = True
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Verificando conteúdo dentro de userMainFrame")
+                    frame = self.page.frame(name="userMainFrame")
+                    if frame:
+                        try:
+                            alvo_f = frame.locator(f"text={numero_processo}")
+                            if alvo_f.count() > 0:
+                                alvo_f.first.click()
+                                try:
+                                    frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                        except Exception:
+                            pass
+                        if not carregado:
+                            try:
+                                link_f = frame.locator("a[href*='VisualizarProcesso']")
+                                if link_f.count() > 0:
+                                    link_f.first.click()
+                                    try:
+                                        frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                        carregado = True
+                                    except Exception:
+                                        frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                        carregado = True
+                            except Exception:
+                                pass
+                        if not carregado:
+                            try:
+                                v_f = frame.locator("a[title*='Visualizar']")
+                                if v_f.count() > 0:
+                                    v_f.first.click()
+                                    try:
+                                        frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                        carregado = True
+                                    except Exception:
+                                        frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                        carregado = True
+                            except Exception:
+                                pass
+                        if not carregado:
+                            try:
+                                row_f = frame.locator("tr", has_text=numero_processo)
+                                if row_f.count() > 0:
+                                    a2f = row_f.first.locator("a[href*='VisualizarProcesso']")
+                                    if a2f.count() > 0:
+                                        a2f.first.click()
+                                        try:
+                                            frame.wait_for_selector("#span_proc_numero", timeout=12000)
+                                            carregado = True
+                                        except Exception:
+                                            frame.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                            carregado = True
+                            except Exception:
+                                pass
+                        try:
+                            frame.wait_for_selector("#span_proc_numero", timeout=8000)
+                            carregado = True
+                        except Exception:
+                            try:
+                                frame.wait_for_selector("tr.filtro-entrada", timeout=8000)
+                                carregado = True
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.logger.info("Varredura em todos os frames por link do processo")
+                    for fr in getattr(self.page, 'frames', []):
+                        if carregado:
+                            break
+                        try:
+                            alvo_t = fr.locator(f"text={numero_processo}")
+                            if alvo_t.count() > 0:
+                                alvo_t.first.click()
+                                try:
+                                    fr.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    fr.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            link_t = fr.locator("a[href*='VisualizarProcesso']")
+                            if link_t.count() > 0:
+                                link_t.first.click()
+                                try:
+                                    fr.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    fr.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            v_t = fr.locator("a[title*='Visualizar']")
+                            if v_t.count() > 0:
+                                v_t.first.click()
+                                try:
+                                    fr.wait_for_selector("#span_proc_numero", timeout=12000)
+                                    carregado = True
+                                except Exception:
+                                    fr.wait_for_selector("tr.filtro-entrada", timeout=12000)
+                                    carregado = True
+                                break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if not carregado:
+                try:
+                    self.snapshot("falha_resultado_processo")
+                except Exception:
+                    pass
+                self.logger.error("Falha ao carregar resultado do processo")
+                return []
             self.logger.info("Resultado carregado")
             
             time.sleep(2)  # Pequena pausa para carregar completamente
@@ -139,6 +708,27 @@ class ProjudiExtractor:
                 pass
             
             # Expande cada movimentação e coleta os anexos (padrão do Projudi)
+            try:
+                self.page.evaluate("""
+                    () => {
+                        document.querySelectorAll('.ui-widget-overlay.ui-front').forEach(el => {
+                            try { el.remove(); } catch(e) {}
+                        });
+                    }
+                """)
+            except Exception:
+                pass
+            try:
+                if frame:
+                    frame.evaluate("""
+                        () => {
+                            document.querySelectorAll('.ui-widget-overlay.ui-front').forEach(el => {
+                                try { el.remove(); } catch(e) {}
+                            });
+                        }
+                    """)
+            except Exception:
+                pass
             anexos = self._listar_anexos()
             self.logger.info(f"Anexos coletados: {len(anexos)}")
             for doc in anexos:
@@ -163,7 +753,9 @@ class ProjudiExtractor:
     def _listar_anexos(self) -> list:
         documentos = []
         try:
-            rows = self.page.locator("tr.filtro-entrada")
+            frame = self.page.frame(name="userMainFrame")
+            base = frame if frame else self.page
+            rows = base.locator("tr.filtro-entrada")
             total = rows.count()
             self.logger.info(f"Movimentações encontradas: {total}")
             for i in range(total):
@@ -176,7 +768,28 @@ class ProjudiExtractor:
                     self.logger.info(f"Expandindo anexos: {aid}")
                 except Exception:
                     pass
-                expand.first.click()
+                try:
+                    self.page.evaluate("""
+                        () => {
+                            document.querySelectorAll('.ui-widget-overlay.ui-front').forEach(el => {
+                                try { el.remove(); } catch(e) {}
+                            });
+                        }
+                    """)
+                except Exception:
+                    pass
+                try:
+                    if frame:
+                        frame.evaluate("""
+                            () => {
+                                document.querySelectorAll('.ui-widget-overlay.ui-front').forEach(el => {
+                                    try { el.remove(); } catch(e) {}
+                                });
+                            }
+                        """)
+                except Exception:
+                    pass
+                expand.first.click(force=True)
                 time.sleep(0.5)
                 anchors = row.locator("xpath=following-sibling::tr[1]//a[@href]")
                 count = anchors.count()
@@ -345,10 +958,8 @@ class ProjudiExtractor:
         try:
             self.logger.info(f"Verificando protocolização da petição {identificador_peticao} no processo {numero_processo}")
             
-            if not self.pesquisar_processo(numero_processo):
-                resultado['mensagem'] = 'Falha ao abrir o processo'
-                return resultado
-            if identificador_peticao:
+            ok_proc = self.pesquisar_processo(numero_processo)
+            if identificador_peticao and ok_proc:
                 alvo_norm = self._normalizar_id(identificador_peticao)
                 doc_match = self._buscar_anexo_por_id(identificador_peticao)
                 if doc_match:
@@ -369,7 +980,7 @@ class ProjudiExtractor:
             self.logger.info(f"Documentos coletados: {len(documentos)}")
             
             if not documentos:
-                resultado['mensagem'] = 'Nenhum documento encontrado no processo'
+                resultado['mensagem'] = 'Nenhum documento encontrado no processo' if ok_proc else 'Falha ao abrir o processo'
                 return resultado
             
             alvo_norm = self._normalizar_id(identificador_peticao)
@@ -414,7 +1025,9 @@ class ProjudiExtractor:
 
     def _buscar_anexo_por_id(self, target_id: str) -> dict:
         try:
-            rows = self.page.locator("tr.filtro-entrada")
+            frame = self.page.frame(name="userMainFrame")
+            base = frame if frame else self.page
+            rows = base.locator("tr.filtro-entrada")
             total = rows.count()
             for i in range(total):
                 row = rows.nth(i)
