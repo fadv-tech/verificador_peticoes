@@ -792,6 +792,42 @@ app.post("/enqueue", (req, res) => {
   }
 });
 
+app.get("/api/v1/batch/:batch_id", (req, res) => {
+  try {
+    const batch_id = req.params.batch_id;
+    const execucao = db.prepare("SELECT * FROM execucoes WHERE batch_id=?").get(batch_id);
+    if (!execucao) return res.status(404).json({ ok: false, error: "Batch not found" });
+
+    const stats = db.prepare(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) as running,
+        SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) as done,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
+      FROM job_items WHERE batch_id=?
+    `).get(batch_id);
+
+    res.json({
+      ok: true,
+      batch_id: execucao.batch_id,
+      status: execucao.status,
+      created_at: execucao.iniciado_em,
+      finished_at: execucao.finalizado_em,
+      progress: {
+        total: stats.total || 0,
+        pending: stats.pending || 0,
+        running: stats.running || 0,
+        done: stats.done || 0,
+        failed: stats.failed || 0,
+        percentage: (stats.total || 0) > 0 ? Math.round((((stats.done || 0) + (stats.failed || 0)) / (stats.total || 0)) * 100) : 0
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 app.post("/api/v1/batch", async (req, res) => {
   try {
     const files = Array.isArray(req.body.files) ? req.body.files : [];

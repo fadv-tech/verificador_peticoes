@@ -1,10 +1,12 @@
 # Documentação da API de Injeção de Bateladas
 
-Este documento descreve como utilizar a API externa para injetar lotes de arquivos (bateladas) e iniciar o processamento automaticamente no Verificador de Petições.
+Este documento descreve como utilizar a API externa para injetar lotes de arquivos (bateladas), iniciar o processamento automaticamente e consultar o status da execução no Verificador de Petições.
 
-## Endpoint Principal
+---
 
-**URL:** `POST /api/v1/batch`
+## 1. Criar e Iniciar Batelada
+
+**URL:** `POST /api/v1/batch`  
 **Content-Type:** `application/json`
 
 Este endpoint realiza duas ações em sequência:
@@ -19,7 +21,7 @@ Este endpoint realiza duas ações em sequência:
 | `usuario` | String   | Não         | CPF do usuário Projudi. Se omitido, usa o configurado no sistema.         |
 | `mode`    | String   | Não         | Modo do navegador: `"headless"` (padrão, invisível) ou `"visible"`.       |
 
-### Exemplo de Requisição (JSON)
+### Exemplo de Requisição
 
 ```json
 {
@@ -45,9 +47,46 @@ Este endpoint realiza duas ações em sequência:
 ```
 
 - `ok`: Indica sucesso da operação.
-- `batch_id`: Identificador único da batelada criada.
+- `batch_id`: Identificador único da batelada criada (guarde este ID para consulta).
 - `count`: Quantidade de arquivos inseridos com sucesso.
 - `worker_started`: `true` se o robô iniciou, `false` se já havia outro robô rodando (neste caso, fica na fila).
+
+---
+
+## 2. Consultar Status da Batelada
+
+**URL:** `GET /api/v1/batch/:batch_id`
+
+Retorna o progresso atual e o status de uma batelada específica.
+
+### Parâmetros da URL
+
+| Parâmetro   | Descrição                                      |
+|-------------|------------------------------------------------|
+| `:batch_id` | O ID da batelada retornado na criação (ex: `a1b2c3d4`). |
+
+### Exemplo de Resposta
+
+```json
+{
+  "ok": true,
+  "batch_id": "a1b2c3d4",
+  "status": "running",
+  "created_at": "2023-10-27 10:00:00",
+  "finished_at": null,
+  "progress": {
+    "total": 10,
+    "pending": 5,
+    "running": 1,
+    "done": 4,
+    "failed": 0,
+    "percentage": 40
+  }
+}
+```
+
+- `status`: Pode ser `queued` (na fila), `starting` (iniciando), `running` (em execução), `done` (finalizado) ou `error`.
+- `progress.percentage`: Porcentagem de conclusão (0 a 100).
 
 ---
 
@@ -55,50 +94,51 @@ Este endpoint realiza duas ações em sequência:
 
 ### 1. cURL (Linha de Comando)
 
-Substitua `localhost:3745` pelo IP/Porta do servidor se estiver remoto.
-
+#### Criar Batelada
 ```bash
 curl -X POST http://localhost:3745/api/v1/batch \
   -H "Content-Type: application/json" \
   -d '{
-    "files": [
-      "Processo A - 12345.pdf",
-      "Processo B - 67890.pdf"
-    ],
-    "mode": "visible"
+    "files": ["Processo A.pdf", "Processo B.pdf"],
+    "mode": "headless"
   }'
+```
+
+#### Consultar Status
+```bash
+curl http://localhost:3745/api/v1/batch/a1b2c3d4
 ```
 
 ### 2. Python (Script de Automação)
 
 ```python
 import requests
-import json
+import time
 
-url = "http://localhost:3745/api/v1/batch"
+BASE_URL = "http://localhost:3745/api/v1/batch"
+
+# 1. Criar Batelada
 payload = {
-    "files": [
-        "Arquivo_Teste_01.pdf",
-        "Arquivo_Teste_02.pdf"
-    ],
-    "usuario": "12345678900"  # Opcional se já configurado no painel
+    "files": ["Arquivo1.pdf", "Arquivo2.pdf"],
+    "mode": "headless"
 }
-headers = {"Content-Type": "application/json"}
+response = requests.post(BASE_URL, json=payload)
+data = response.json()
+batch_id = data['batch_id']
+print(f"Batch criado: {batch_id}. Worker iniciado: {data['worker_started']}")
 
-try:
-    response = requests.post(url, json=payload)
-    if response.status_code == 200:
-        data = response.json()
-        print(f"Sucesso! Batch ID: {data['batch_id']}")
-        print(f"Status do Worker: {data['message']}")
-    else:
-        print(f"Erro na requisição: {response.text}")
-except Exception as e:
-    print(f"Erro de conexão: {e}")
+# 2. Monitorar Progresso
+while True:
+    res = requests.get(f"{BASE_URL}/{batch_id}")
+    status = res.json()
+    
+    pct = status['progress']['percentage']
+    st = status['status']
+    print(f"Status: {st} - {pct}% concluído")
+    
+    if st in ['done', 'error']:
+        print("Finalizado!")
+        break
+        
+    time.sleep(5)
 ```
-
-## Notas Importantes
-
-1. **Fila de Processamento:** Se já houver uma batelada em execução (`worker_started: false`), a nova batelada ficará com status `queued` (na fila) e será processada automaticamente assim que o robô atual terminar.
-2. **Credenciais:** O sistema utiliza as credenciais do Projudi salvas no banco de dados. Se o parâmetro `usuario` for enviado e houver senha salva para ele, o sistema fará a troca automática de contexto.
-3. **Validação:** Arquivos inválidos ou vazios na lista são ignorados silenciosamente; o campo `count` indica quantos foram efetivamente aceitos.
