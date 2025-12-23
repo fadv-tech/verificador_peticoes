@@ -1,0 +1,8 @@
+2025-11-18 13:08:26,752 - WDM - INFO - ====== WebDriver manager ======
+2025-11-18 13:08:27,385 - WDM - INFO - Get LATEST chromedriver version for google-chrome
+2025-11-18 13:08:27,596 - WDM - INFO - Get LATEST chromedriver version for google-chrome
+2025-11-18 13:08:27,809 - WDM - INFO - Driver [C:\Users\Administrator\.wdm\drivers\chromedriver\win64\142.0.7444.175\chromedriver-win32/chromedriver.exe] found in cache
+2025-11-18 13:08:29,569 - projudi_extractor - INFO - ChromeDriver configurado com sucesso
+2025-11-18 13:08:31,671 - projudi_extractor - INFO - Driver fechado com sucesso
+2025-11-18 14:06:04,918 - projudi_extractor - INFO - Browser Playwright configurado
+2025-11-18 14:06:04,993 - projudi_extractor - INFO - Browser fechado

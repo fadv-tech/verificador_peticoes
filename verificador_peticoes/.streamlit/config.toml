@@ -1,0 +1,11 @@
+[server]
+port = 3851
+address = "127.0.0.1"
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+enableWebsocketCompression = false
+
+[browser]
+serverAddress = "localhost"
+serverPort = 3856

@@ -1,5 +1,3 @@
-import pandas as pd
-from bs4 import BeautifulSoup
 import time
 import logging
 import os
@@ -19,6 +17,7 @@ class ProjudiExtractor:
         else:
             self.logger = logging.getLogger(__name__)
         self.batch_id = batch_id or ""
+        self.last_error = ""
     
     def setup_logging(self):
         return
@@ -32,8 +31,20 @@ class ProjudiExtractor:
                     pass
             self.logger.info(f"Inicializando navegador headless={headless}")
             self._pw = sync_playwright().start()
-            self.browser = self._pw.chromium.launch(headless=headless, args=["--start-maximized"]) 
+            self.browser = self._pw.chromium.launch(
+                headless=headless,
+                args=[
+                    "--start-maximized",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-features=VizDisplayCompositor"
+                ]
+            ) 
             self.context = self.browser.new_context(ignore_https_errors=True)
+            try:
+                self.context.set_default_timeout(15000)
+            except Exception:
+                pass
             self.page = self.context.new_page()
             self.logger.info("Browser Playwright configurado")
             try:
@@ -43,7 +54,7 @@ class ProjudiExtractor:
             return True
         except Exception as e:
             self.logger.error(f"Erro ao configurar Playwright: {e}")
-            return False
+        return False
 
     def realizar_login(self, usuario: str, senha: str) -> bool:
         try:
@@ -110,6 +121,10 @@ class ProjudiExtractor:
                         self.page = self.context.new_page()
                     self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso?PaginaAtual=4", wait_until="domcontentloaded")
                 except Exception:
+                    try:
+                        self.last_error = "falha_abrir_busca"
+                    except Exception:
+                        pass
                     self.logger.error("Falha ao abrir busca de processo")
                     return False
             frame = self.page.frame(name="userMainFrame")
@@ -173,6 +188,12 @@ class ProjudiExtractor:
                         try:
                             if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                 self.page = self.context.pages[-1]
+                                try:
+                                    for p in self.context.pages[:-1]:
+                                        try: p.close()
+                                        except Exception: pass
+                                except Exception:
+                                    pass
                                 frame = self.page.frame(name="userMainFrame")
                         except Exception:
                             pass
@@ -193,6 +214,12 @@ class ProjudiExtractor:
                         try:
                             if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                 self.page = self.context.pages[-1]
+                                try:
+                                    for p in self.context.pages[:-1]:
+                                        try: p.close()
+                                        except Exception: pass
+                                except Exception:
+                                    pass
                                 frame = self.page.frame(name="userMainFrame")
                         except Exception:
                             pass
@@ -213,6 +240,12 @@ class ProjudiExtractor:
                         try:
                             if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                 self.page = self.context.pages[-1]
+                                try:
+                                    for p in self.context.pages[:-1]:
+                                        try: p.close()
+                                        except Exception: pass
+                                except Exception:
+                                    pass
                                 frame = self.page.frame(name="userMainFrame")
                         except Exception:
                             pass
@@ -235,6 +268,12 @@ class ProjudiExtractor:
                             try:
                                 if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                     self.page = self.context.pages[-1]
+                                    try:
+                                        for p in self.context.pages[:-1]:
+                                            try: p.close()
+                                            except Exception: pass
+                                    except Exception:
+                                        pass
                                     frame = self.page.frame(name="userMainFrame")
                             except Exception:
                                 pass
@@ -258,6 +297,12 @@ class ProjudiExtractor:
                                 try:
                                     if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                         self.page = self.context.pages[-1]
+                                        try:
+                                            for p in self.context.pages[:-1]:
+                                                try: p.close()
+                                                except Exception: pass
+                                        except Exception:
+                                            pass
                                         frame = self.page.frame(name="userMainFrame")
                                 except Exception:
                                     pass
@@ -277,6 +322,12 @@ class ProjudiExtractor:
                                     try:
                                         if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                             self.page = self.context.pages[-1]
+                                            try:
+                                                for p in self.context.pages[:-1]:
+                                                    try: p.close()
+                                                    except Exception: pass
+                                            except Exception:
+                                                pass
                                             frame = self.page.frame(name="userMainFrame")
                                     except Exception:
                                         pass
@@ -296,6 +347,12 @@ class ProjudiExtractor:
                                     try:
                                         if hasattr(self, 'context') and len(getattr(self.context, 'pages', [])) > 1:
                                             self.page = self.context.pages[-1]
+                                            try:
+                                                for p in self.context.pages[:-1]:
+                                                    try: p.close()
+                                                    except Exception: pass
+                                            except Exception:
+                                                pass
                                             frame = self.page.frame(name="userMainFrame")
                                     except Exception:
                                         pass
@@ -344,6 +401,20 @@ class ProjudiExtractor:
                     self.snapshot("falha_abrir_processo")
                 except Exception:
                     pass
+                try:
+                    cur_url = ""
+                    try:
+                        cur_url = str(getattr(self.page, 'url', '') or "")
+                    except Exception:
+                        pass
+                    has_frame = False
+                    try:
+                        has_frame = bool(self.page.frame(name="userMainFrame"))
+                    except Exception:
+                        has_frame = False
+                    self.last_error = f"nao_abriu_processo url={cur_url or '-'} frame={('ok' if has_frame else 'na')}"
+                except Exception:
+                    self.last_error = "nao_abriu_processo"
                 self.logger.error("Não foi possível abrir a página do processo")
                 return False
             self.logger.info("Página do processo carregada")
@@ -354,6 +425,15 @@ class ProjudiExtractor:
                 pass
             return True
         except Exception as e:
+            try:
+                cur_url = ""
+                try:
+                    cur_url = str(getattr(self.page, 'url', '') or "")
+                except Exception:
+                    pass
+                self.last_error = f"erro_pesquisar url={cur_url or '-'} msg={str(e)}"
+            except Exception:
+                self.last_error = f"erro_pesquisar msg={str(e)}"
             self.logger.error(f"Erro ao pesquisar processo {numero_processo}: {e}")
             return False
     
@@ -374,6 +454,10 @@ class ProjudiExtractor:
                         self.page = self.context.new_page()
                     self.page.goto("https://projudi.tjgo.jus.br/BuscaProcesso", wait_until="domcontentloaded")
                 except Exception:
+                    try:
+                        self.last_error = "falha_abrir_busca_docs"
+                    except Exception:
+                        pass
                     self.logger.error("Falha ao abrir página de busca de processo")
                     return []
             self.logger.info("Página de busca aberta")
@@ -697,6 +781,20 @@ class ProjudiExtractor:
                     self.snapshot("falha_resultado_processo")
                 except Exception:
                     pass
+                try:
+                    cur_url = ""
+                    try:
+                        cur_url = str(getattr(self.page, 'url', '') or "")
+                    except Exception:
+                        pass
+                    has_frame = False
+                    try:
+                        has_frame = bool(self.page.frame(name="userMainFrame"))
+                    except Exception:
+                        has_frame = False
+                    self.last_error = f"falha_resultado url={cur_url or '-'} frame={('ok' if has_frame else 'na')}"
+                except Exception:
+                    self.last_error = "falha_resultado"
                 self.logger.error("Falha ao carregar resultado do processo")
                 return []
             self.logger.info("Resultado carregado")
@@ -791,6 +889,15 @@ class ProjudiExtractor:
                     pass
                 expand.first.click(force=True)
                 time.sleep(0.5)
+                try:
+                    row.locator("xpath=following-sibling::tr[1]//a[@href]").wait_for(state="visible", timeout=2000)
+                except Exception:
+                    pass
+                mov_date = ''
+                try:
+                    mov_date = self._pick_movement_date(row) or ''
+                except Exception:
+                    mov_date = ''
                 anchors = row.locator("xpath=following-sibling::tr[1]//a[@href]")
                 count = anchors.count()
                 self.logger.info(f"Arquivos anexos: {count}")
@@ -799,6 +906,48 @@ class ProjudiExtractor:
                     href = a.get_attribute("href")
                     title = a.get_attribute("title") or a.inner_text()
                     info = self._parse_nome_documento(title or "")
+                    try:
+                        att_row = row.locator("xpath=following-sibling::tr[1]")
+                        att_text = att_row.inner_text()
+                        if not info.get('data'):
+                            info['data'] = self._pick_protocol_date(att_text)
+                    except Exception:
+                        pass
+                    if not info.get('data'):
+                        try:
+                            cells = att_row.locator("td")
+                            ccount = cells.count()
+                            for ci in range(ccount):
+                                if info.get('data'):
+                                    break
+                                tx = cells.nth(ci).inner_text()
+                                d2 = self._pick_protocol_date(tx)
+                                if d2:
+                                    info['data'] = d2
+                                    break
+                        except Exception:
+                            pass
+                    if not info.get('data'):
+                        try:
+                            for k in [2,3]:
+                                if info.get('data'):
+                                    break
+                                rowk = row.locator(f"xpath=following-sibling::tr[{k}]")
+                                if rowk.count() > 0:
+                                    txk = rowk.inner_text()
+                                    d3 = self._pick_protocol_date(txk)
+                                    if d3:
+                                        info['data'] = d3
+                                        break
+                        except Exception:
+                            pass
+                    if not info.get('data'):
+                        try:
+                            info['data'] = self._pick_protocol_date(title or "")
+                        except Exception:
+                            pass
+                    if not info.get('data') and mov_date:
+                        info['data'] = mov_date
                     if not info.get('id'):
                         try:
                             import re
@@ -879,11 +1028,13 @@ class ProjudiExtractor:
                             id_info['id'] = padrao
                             break
             
-            # Tenta extrair data
-            padrao_data = r'(\d{2})\.(\d{2})\.(\d{4})'
-            data_match = re.search(padrao_data, nome)
+            padrao_data1 = r'(\d{2})\.(\d{2})\.(\d{4})'
+            padrao_data2 = r'(\d{2})\/(\d{2})\/(\d{4})'
+            padrao_data3 = r'(\d{2})\-(\d{2})\-(\d{4})'
+            import re
+            data_match = re.search(padrao_data1, nome) or re.search(padrao_data2, nome) or re.search(padrao_data3, nome)
             if data_match:
-                id_info['data'] = data_match.group(0)
+                id_info['data'] = self._sanitize_date_token(data_match.group(0))
             
             # Tenta identificar tipo de documento
             tipos_comuns = ['manifestação', 'petição', 'certidão', 'despacho', 'decisão', 'cumprimento']
@@ -932,7 +1083,113 @@ class ProjudiExtractor:
             return False
         
         return True
+
+    def _sanitize_date_token(self, token: str) -> str:
+        try:
+            if not token:
+                return ''
+            s = str(token).strip().replace('.', '/').replace('-', '/').replace(' ', '')
+            import re
+            m = re.match(r'^(\d{2})/(\d{2})/(\d{4})$', s)
+            if m:
+                dd = int(m.group(1)); mm = int(m.group(2)); yy = int(m.group(3))
+                if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                    return ''
+                return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+            m2 = re.match(r'^(\d{4})/(\d{2})/(\d{2})$', s)
+            if m2:
+                yy = int(m2.group(1)); mm = int(m2.group(2)); dd = int(m2.group(3))
+                if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                    return ''
+                return f"{m2.group(3)}/{m2.group(2)}/{m2.group(1)}"
+            return ''
+        except Exception:
+            return ''
+
+    def _pick_protocol_date(self, text: str) -> str:
+        try:
+            import re
+            txt = str(text or '')
+            pats = [
+                r'(?i)Data\s+de\s+Protocolo[:\s]+(\d{2}[-\./]\d{2}[-\./]\d{4})',
+                r'(?i)Data\s+do\s+Protocolo[:\s]+(\d{2}[-\./]\d{2}[-\./]\d{4})',
+                r'(?i)Protocolo\s+em[:\s]+(\d{2}[-\./]\d{2}[-\./]\d{4})',
+                r'(?i)Protocolo[:\s]+(\d{2}[-\./]\d{2}[-\./]\d{4})',
+                r'(?i)Protocolada\s+em[:\s]?(\d{2}[-\./]\d{2}[-\./]\d{4})',
+                r'(?i)Protocolado\s+em[:\s]?(\d{2}[-\./]\d{2}[-\./]\d{4})'
+            ]
+            for p in pats:
+                m = re.search(p, txt)
+                if m:
+                    s = self._sanitize_date_token(m.group(1))
+                    if s:
+                        return s
+            matches = list(re.finditer(r'(\d{2}[-\./]\d{2}[-\./]\d{4})', txt))
+            iso_matches = list(re.finditer(r'(\d{4}[-/]\d{2}[-/]\d{2})', txt))
+            if not matches:
+                matches = iso_matches
+                if not matches:
+                    return ''
+            keypos = None
+            for k in ['protocolo', 'protocol', 'protocolada', 'protocolado', 'protocolização']:
+                p = txt.lower().find(k)
+                if p >= 0:
+                    keypos = p if keypos is None else min(keypos, p)
+            candidates = []
+            for m in matches:
+                tok = m.group(1)
+                norm = self._sanitize_date_token(tok)
+                if not norm:
+                    continue
+                dist = abs((m.start() - keypos)) if keypos is not None else m.start()
+                candidates.append((dist, norm))
+            if not candidates:
+                return ''
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+        except Exception:
+            return ''
     
+    def _pick_movement_date(self, row) -> str:
+        try:
+            td = row.locator("td[width='100'][align='center']")
+            if td.count() > 0:
+                txt = (td.first.inner_text() or '').strip()
+                import re
+                m = re.search(r"(\d{2}[-\./]\d{2}[-\./]\d{4})", txt)
+                if m:
+                    return self._sanitize_date_token(m.group(1))
+                m_iso = re.search(r"(\d{4}[-/]\d{2}[-/]\d{2})", txt)
+                if m_iso:
+                    return self._sanitize_date_token(m_iso.group(1))
+        except Exception:
+            pass
+        try:
+            td3 = row.locator("xpath=./td[3]")
+            if td3.count() > 0:
+                txt = (td3.first.inner_text() or '').strip()
+                import re
+                m = re.search(r"(\d{2}[-\./]\d{2}[-\./]\d{4})", txt)
+                if m:
+                    return self._sanitize_date_token(m.group(1))
+                m_iso = re.search(r"(\d{4}[-/]\d{2}[-/]\d{2})", txt)
+                if m_iso:
+                    return self._sanitize_date_token(m_iso.group(1))
+        except Exception:
+            pass
+        try:
+            txt2 = (row.inner_text() or '')
+            import re
+            m2 = re.search(r"(\d{2}[-\./]\d{2}[-\./]\d{4})", txt2)
+            if m2:
+                return self._sanitize_date_token(m2.group(1))
+            m2_iso = re.search(r"(\d{4}[-/]\d{2}[-/]\d{2})", txt2)
+            if m2_iso:
+                return self._sanitize_date_token(m2_iso.group(1))
+        except Exception:
+            pass
+        return ''
+
     def verificar_protocolizacao(self, numero_processo: str, identificador_peticao: str) -> dict:
         """
         Verifica se uma petição específica foi protocolizada no processo
@@ -980,7 +1237,16 @@ class ProjudiExtractor:
             self.logger.info(f"Documentos coletados: {len(documentos)}")
             
             if not documentos:
-                resultado['mensagem'] = 'Nenhum documento encontrado no processo' if ok_proc else 'Falha ao abrir o processo'
+                if ok_proc:
+                    resultado['mensagem'] = 'Nenhum documento encontrado no processo'
+                else:
+                    msg = 'Falha ao abrir o processo'
+                    try:
+                        if getattr(self, 'last_error', ''):
+                            msg = f'{msg} ({self.last_error})'
+                    except Exception:
+                        pass
+                    resultado['mensagem'] = msg
                 return resultado
             
             alvo_norm = self._normalizar_id(identificador_peticao)
@@ -1034,8 +1300,28 @@ class ProjudiExtractor:
                 expand = row.locator("img[id^='MostrarArquivos_']")
                 if expand.count() == 0:
                     continue
-                expand.first.click()
+                try:
+                    if frame:
+                        frame.evaluate("""
+                            () => {
+                                document.querySelectorAll('.ui-widget-overlay.ui-front').forEach(el => {
+                                    try { el.remove(); } catch(e) {}
+                                });
+                            }
+                        """)
+                except Exception:
+                    pass
+                expand.first.click(force=True)
                 time.sleep(0.5)
+                try:
+                    row.locator("xpath=following-sibling::tr[1]//a[@href]").wait_for(state="visible", timeout=2000)
+                except Exception:
+                    pass
+                mov_date = ''
+                try:
+                    mov_date = self._pick_movement_date(row) or ''
+                except Exception:
+                    mov_date = ''
                 anchors = row.locator("xpath=following-sibling::tr[1]//a[@href]")
                 count = anchors.count()
                 for j in range(count):
@@ -1043,6 +1329,34 @@ class ProjudiExtractor:
                     href = a.get_attribute("href")
                     title = a.get_attribute("title") or a.inner_text()
                     info = self._parse_nome_documento(title or "", target_id)  # PASSAR O ID DO SISTEMA
+                    try:
+                        att_row = row.locator("xpath=following-sibling::tr[1]")
+                        att_text = att_row.inner_text()
+                        if not info.get('data'):
+                            info['data'] = self._pick_protocol_date(att_text)
+                    except Exception:
+                        pass
+                    if not info.get('data'):
+                        try:
+                            cells = att_row.locator("td")
+                            ccount = cells.count()
+                            for ci in range(ccount):
+                                if info.get('data'):
+                                    break
+                                tx = cells.nth(ci).inner_text()
+                                d2 = self._pick_protocol_date(tx)
+                                if d2:
+                                    info['data'] = d2
+                                    break
+                        except Exception:
+                            pass
+                    if not info.get('data'):
+                        try:
+                            info['data'] = self._pick_protocol_date(title or "")
+                        except Exception:
+                            pass
+                    if not info.get('data') and mov_date:
+                        info['data'] = mov_date
                     if not info.get('id'):
                         try:
                             import re
@@ -1139,4 +1453,3 @@ def processar_lista_arquivos(arquivos: list) -> list:
                 logging.warning(f"Não foi possível extrair informações do arquivo: {arquivo}")
     
     return processados
-pass

@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { exec } from "child_process";
 import fs from "fs";
+import ExcelJS from "exceljs";
 
 const app = express();
 app.use(cors());
@@ -22,6 +23,7 @@ function initDB() {
     db.exec("PRAGMA synchronous=NORMAL;");
     db.exec(`CREATE TABLE IF NOT EXISTS verificacoes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id INTEGER,
       numero_processo TEXT NOT NULL,
       identificador_peticao TEXT NOT NULL,
       nome_arquivo_original TEXT NOT NULL,
@@ -29,7 +31,12 @@ function initDB() {
       peticao_encontrada TEXT,
       data_verificacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       detalhes TEXT,
-      UNIQUE(numero_processo, identificador_peticao)
+      data_protocolo TEXT,
+      usuario_projudi TEXT DEFAULT '',
+      navegador_modo TEXT DEFAULT '',
+      host_execucao TEXT DEFAULT '',
+      batch_id TEXT DEFAULT '',
+      UNIQUE(item_id)
     )`);
     db.exec(`CREATE TABLE IF NOT EXISTS logs_verificacao (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +88,32 @@ function initDB() {
     if (!vcols.includes("navegador_modo")) db.exec("ALTER TABLE verificacoes ADD COLUMN navegador_modo TEXT DEFAULT ''");
     if (!vcols.includes("host_execucao")) db.exec("ALTER TABLE verificacoes ADD COLUMN host_execucao TEXT DEFAULT ''");
     if (!vcols.includes("batch_id")) db.exec("ALTER TABLE verificacoes ADD COLUMN batch_id TEXT DEFAULT ''");
+    if (!vcols.includes("data_protocolo")) db.exec("ALTER TABLE verificacoes ADD COLUMN data_protocolo TEXT");
+    if (!vcols.includes("item_id")) {
+      try {
+        db.exec(`CREATE TABLE IF NOT EXISTS verificacoes_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          item_id INTEGER,
+          numero_processo TEXT NOT NULL,
+          identificador_peticao TEXT NOT NULL,
+          nome_arquivo_original TEXT NOT NULL,
+          status_verificacao TEXT NOT NULL,
+          peticao_encontrada TEXT,
+          data_verificacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          detalhes TEXT,
+          data_protocolo TEXT,
+          usuario_projudi TEXT DEFAULT '',
+          navegador_modo TEXT DEFAULT '',
+          host_execucao TEXT DEFAULT '',
+          batch_id TEXT DEFAULT '',
+          UNIQUE(item_id)
+        )`);
+        db.exec(`INSERT INTO verificacoes_new (id, numero_processo, identificador_peticao, nome_arquivo_original, status_verificacao, peticao_encontrada, data_verificacao, detalhes, data_protocolo, usuario_projudi, navegador_modo, host_execucao, batch_id)
+                 SELECT id, numero_processo, identificador_peticao, nome_arquivo_original, status_verificacao, peticao_encontrada, data_verificacao, detalhes, data_protocolo, COALESCE(usuario_projudi,''), COALESCE(navegador_modo,''), COALESCE(host_execucao,''), COALESCE(batch_id,'') FROM verificacoes`);
+        db.exec("DROP TABLE verificacoes");
+        db.exec("ALTER TABLE verificacoes_new RENAME TO verificacoes");
+      } catch {}
+    }
 
     const lcols = db.prepare("PRAGMA table_info(logs_verificacao)").all().map(r => r.name);
     if (!lcols.includes("batch_id")) db.exec("ALTER TABLE logs_verificacao ADD COLUMN batch_id TEXT");
@@ -111,9 +144,87 @@ function initDB() {
 }
 
 initDB();
+reconcileVerificacoes();
+recoverStuckItems();
 
 const clients = new Set();
 let sseTimer = null;
+let robotsMonitor = null;
+function reconcileVerificacoes() {
+  try {
+    const items = db.prepare("SELECT id, batch_id, numero_processo, identificador, nome_arquivo FROM job_items WHERE status='done'").all();
+    for (const it of items) {
+      const ex = db.prepare("SELECT 1 FROM verificacoes WHERE item_id=?").get(it.id);
+      if (ex) continue;
+      const ex2 = db.prepare("SELECT 1 FROM verificacoes WHERE batch_id=? AND nome_arquivo_original=?").get(it.batch_id, it.nome_arquivo);
+      if (ex2) {
+        try { db.prepare("UPDATE verificacoes SET item_id=? WHERE batch_id=? AND nome_arquivo_original=? AND item_id IS NULL").run(it.id, it.batch_id, it.nome_arquivo); } catch {}
+        continue;
+      }
+      const base = db.prepare("SELECT * FROM verificacoes WHERE batch_id=? AND numero_processo=? AND identificador_peticao=? LIMIT 1").get(it.batch_id, it.numero_processo, it.identificador);
+      if (!base) continue;
+      try {
+        db.prepare(`INSERT INTO verificacoes (item_id, numero_processo, identificador_peticao, nome_arquivo_original, status_verificacao, peticao_encontrada, detalhes, data_protocolo, usuario_projudi, navegador_modo, host_execucao, batch_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(it.id, base.numero_processo, base.identificador_peticao, it.nome_arquivo, base.status_verificacao, base.peticao_encontrada, base.detalhes, base.data_protocolo, base.usuario_projudi || '', base.navegador_modo || '', base.host_execucao || '', base.batch_id);
+      } catch {}
+    }
+    const toDelete = db.prepare(`SELECT v1.id as id_null
+                                 FROM verificacoes v1
+                                 WHERE v1.item_id IS NULL AND EXISTS (
+                                   SELECT 1 FROM verificacoes v2
+                                   WHERE v2.batch_id=v1.batch_id AND v2.nome_arquivo_original=v1.nome_arquivo_original AND v2.item_id IS NOT NULL
+                                 )`).all();
+    for (const r of toDelete) { try { db.prepare("DELETE FROM verificacoes WHERE id=?").run(r.id_null); } catch {} }
+    const toDelete2 = db.prepare(`SELECT v1.id as id_null
+                                  FROM verificacoes v1
+                                  WHERE v1.item_id IS NULL AND EXISTS (
+                                    SELECT 1 FROM verificacoes v2
+                                    WHERE v2.batch_id=v1.batch_id AND v2.numero_processo=v1.numero_processo AND v2.identificador_peticao=v1.identificador_peticao AND v2.item_id IS NOT NULL
+                                  )`).all();
+    for (const r of toDelete2) { try { db.prepare("DELETE FROM verificacoes WHERE id=?").run(r.id_null); } catch {} }
+  } catch {}
+}
+
+function recoverStuckItems() {
+  try {
+    const stuck = db.prepare(`
+      SELECT id, batch_id, COALESCE(updated_at, created_at) AS ts
+      FROM job_items
+      WHERE status='running' AND (strftime('%s','now') - strftime('%s', COALESCE(updated_at, created_at))) > 60
+    `).all();
+    for (const it of stuck) {
+      try {
+        const logs = db.prepare("SELECT mensagem FROM logs_verificacao WHERE batch_id=? AND timestamp >= DATETIME('now','-90 seconds') ORDER BY timestamp DESC LIMIT 50").all(it.batch_id).map(r => String(r.mensagem || ''));
+        let heavy = false;
+        for (const m of logs) {
+          const mm1 = m.match(/Movimentações encontradas:\s*(\d+)/i);
+          const mm2 = m.match(/Anexos coletados:\s*(\d+)/i);
+          if ((mm1 && parseInt(mm1[1], 10) >= 30) || (mm2 && parseInt(mm2[1], 10) >= 60)) { heavy = true; break; }
+        }
+        if (heavy) continue;
+        db.prepare("UPDATE job_items SET status='pending', mensagem='Watchdog: reiniciado', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(it.id);
+        db.prepare("UPDATE execucoes SET status='queued' WHERE batch_id=? AND status!='done'").run(it.batch_id);
+      } catch {}
+    }
+  } catch {}
+}
+
+function reconcileExecucoesStatus() {
+  try {
+    const exs = db.prepare("SELECT batch_id, status FROM execucoes").all();
+    for (const e of exs) {
+      const pend = db.prepare("SELECT COUNT(*) as c FROM job_items WHERE batch_id=? AND status='pending'").get(e.batch_id).c;
+      const run = db.prepare("SELECT COUNT(*) as c FROM job_items WHERE batch_id=? AND status='running'").get(e.batch_id).c;
+      const done = db.prepare("SELECT COUNT(*) as c FROM job_items WHERE batch_id=? AND status='done'").get(e.batch_id).c;
+      const fail = db.prepare("SELECT COUNT(*) as c FROM job_items WHERE batch_id=? AND status='failed'").get(e.batch_id).c;
+      const total = pend + run + done + fail;
+      let st = e.status;
+      if (run > 0) st = 'running'; else if (pend > 0) st = 'queued'; else st = 'done';
+      db.prepare("UPDATE execucoes SET status=?, progress=? WHERE batch_id=?").run(st, done, e.batch_id);
+    }
+  } catch {}
+}
 
 function readSummary() {
   const total = db.prepare("SELECT COUNT(*) as c FROM verificacoes").get().c;
@@ -128,7 +239,7 @@ function readJobs() {
     SELECT 
       e.*, 
       MIN(100.0, ROUND(100.0 * COALESCE(e.progress,0) / NULLIF(e.total_arquivos,0), 1)) AS pct,
-      (SELECT COUNT(DISTINCT ji.numero_processo) FROM job_items ji WHERE ji.batch_id=e.batch_id) AS processos_enviados,
+      (SELECT COUNT(*) FROM job_items ji WHERE ji.batch_id=e.batch_id) AS processos_enviados,
       (SELECT COUNT(*) FROM job_items ji WHERE ji.batch_id=e.batch_id) AS itens_total,
       (SELECT COUNT(*) FROM job_items ji WHERE ji.batch_id=e.batch_id AND ji.status!='pending') AS itens_analisados,
       (SELECT COUNT(*) FROM job_items ji WHERE ji.batch_id=e.batch_id AND ji.status='pending') AS itens_pendentes,
@@ -206,6 +317,9 @@ app.get("/events", (req, res) => {
     sseTimer = setInterval(() => {
       for (const c of clients) {
         try {
+          reconcileVerificacoes();
+          recoverStuckItems();
+          reconcileExecucoesStatus();
           const sum2 = readSummary();
           const jobs2 = readJobs();
           const b2 = readBatch(c.batch);
@@ -277,10 +391,72 @@ app.get("/jobs/:batch/logs", (req, res) => {
 
 app.get("/jobs/:batch/results", (req, res) => {
   try {
-    const rows = db
-      .prepare("SELECT * FROM verificacoes WHERE batch_id=? ORDER BY data_verificacao DESC")
-      .all(req.params.batch);
+    const rows = db.prepare(`
+      SELECT 
+        ji.id AS item_id,
+        COALESCE(v.numero_processo, ji.numero_processo) AS numero_processo,
+        COALESCE(v.identificador_peticao, ji.identificador) AS identificador_peticao,
+        COALESCE(v.nome_arquivo_original, ji.nome_arquivo) AS nome_arquivo_original,
+        COALESCE(v.status_verificacao, CASE WHEN ji.status='failed' THEN 'Erro' ELSE '' END) AS status_verificacao,
+        COALESCE(v.peticao_encontrada,'') AS peticao_encontrada,
+        v.data_verificacao AS data_verificacao,
+        COALESCE(v.detalhes,'') AS detalhes,
+        COALESCE(v.data_protocolo,'') AS data_protocolo,
+        COALESCE(v.usuario_projudi,'') AS usuario_projudi,
+        COALESCE(v.navegador_modo,'') AS navegador_modo,
+        COALESCE(v.host_execucao,'') AS host_execucao,
+        ji.batch_id AS batch_id
+      FROM job_items ji
+      LEFT JOIN verificacoes v ON v.item_id = ji.id
+      WHERE ji.batch_id=? AND ji.status!='pending'
+      ORDER BY COALESCE(v.data_verificacao, ji.id) DESC
+    `).all(req.params.batch);
     res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/reconcile', (req, res) => {
+  try {
+    reconcileVerificacoes();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/sanitize_dates', (req, res) => {
+  try {
+    db.exec(`UPDATE verificacoes 
+             SET data_protocolo='' 
+             WHERE COALESCE(data_protocolo,'') <> '' 
+               AND (
+                 CAST(substr(data_protocolo,4,2) AS INTEGER) NOT BETWEEN 1 AND 12 
+                 OR CAST(substr(data_protocolo,1,2) AS INTEGER) NOT BETWEEN 1 AND 31
+               )`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/sanitize_protocol_no_date', (req, res) => {
+  try {
+    db.exec("UPDATE verificacoes SET status_verificacao='Não encontrada' WHERE status_verificacao='Protocolizada' AND COALESCE(data_protocolo,'')='' ");
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/jobs/:batch/requeue-failed', (req, res) => {
+  try {
+    const batch = req.params.batch;
+    db.prepare("UPDATE job_items SET status='pending', mensagem='' WHERE batch_id=? AND status='failed'").run(batch);
+    db.prepare("UPDATE execucoes SET status='queued', finalizado_em=NULL WHERE batch_id=?").run(batch);
+    try { db.prepare("INSERT INTO logs_verificacao (nivel,mensagem,detalhes,batch_id) VALUES ('INFO','Requeue de itens failed','admin', ?)").run(batch); } catch {}
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -293,6 +469,130 @@ app.get("/results", (req, res) => {
       .prepare("SELECT * FROM verificacoes ORDER BY data_verificacao DESC LIMIT ?")
       .all(limit);
     res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+function splitCods(id) {
+  try {
+    const m = String(id || '').match(/_(\d+)_(\d+)_/);
+    if (!m) return { codproc: '', codpet: '' };
+    return { codproc: m[1], codpet: m[2] };
+  } catch { return { codproc: '', codpet: '' }; }
+}
+
+function fmtProtocolDate(s) {
+  try {
+    const v = String(s || '').trim();
+    if (!v) return '';
+    let dd = '', mm = '', yy = '';
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(v)) {
+      const p = v.split('/'); dd = p[0]; mm = p[1]; yy = p[2];
+    } else if (/^\d{2}\.\d{2}\.\d{4}$/.test(v)) {
+      const p = v.split('.'); dd = p[0]; mm = p[1]; yy = p[2];
+    } else if (/^\d{4}-\d{2}-\d{2}/.test(v)) {
+      const p = v.slice(0,10).split('-'); yy = p[0]; mm = p[1]; dd = p[2];
+    } else {
+      const m = v.match(/(\d{2})[./](\d{2})[./](\d{4})/);
+      if (m) { dd = m[1]; mm = m[2]; yy = m[3]; }
+    }
+    if (!dd || !mm || !yy) return '';
+    const mdi = parseInt(mm, 10); const ddi = parseInt(dd, 10);
+    if (mdi < 1 || mdi > 12 || ddi < 1 || ddi > 31) return '';
+    return `${dd}/${mm}/${yy}`;
+  } catch { return ''; }
+}
+
+app.get("/successes", (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 1000);
+    const rows = db.prepare(`
+      SELECT * FROM verificacoes 
+      WHERE status_verificacao='Protocolizada' 
+      ORDER BY data_verificacao DESC 
+      LIMIT ?
+    `).all(limit);
+    const list = rows.map(r => ({
+      data_verificacao: r.data_verificacao,
+      numero_processo: r.numero_processo,
+      identificador_peticao: r.identificador_peticao,
+      nome_arquivo_original: r.nome_arquivo_original,
+      data_protocolo: r.data_protocolo,
+      status_verificacao: r.status_verificacao,
+      detalhes: r.detalhes,
+      ...splitCods(r.identificador_peticao)
+    }));
+    res.json(list);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/export/successes.csv", (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 5000);
+    const rows = db.prepare(`
+      SELECT * FROM verificacoes 
+      WHERE status_verificacao='Protocolizada' 
+      ORDER BY data_verificacao DESC 
+      LIMIT ?
+    `).all(limit);
+    const header = ['data_verificacao','numero_processo','codproc','codpet','identificador_peticao','nome_arquivo_original','data_protocolo'];
+    const lines = [header.join(',')];
+    rows.forEach(r => {
+      const { codproc, codpet } = splitCods(r.identificador_peticao);
+      const vals = [
+        r.data_verificacao || '',
+        r.numero_processo || '',
+        codproc || '',
+        codpet || '',
+        r.identificador_peticao || '',
+        r.nome_arquivo_original || '',
+        r.data_protocolo || ''
+      ];
+      const esc = vals.map(v => {
+        const s = String(v).replace(/\r|\n/g,' ').replace(/"/g,'""');
+        return /,|\s|"/.test(s) ? `"${s}"` : s;
+      });
+      lines.push(esc.join(','));
+    });
+    const csv = lines.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sucessos.csv"');
+    res.send(csv);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/export/successes.xlsx", async (req, res) => {
+  try {
+    const maxLimit = 25000;
+    const reqLimit = Number(req.query.limit || 5000);
+    const limit = Math.min(Number.isFinite(reqLimit) ? reqLimit : 5000, maxLimit);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="sucessos_codpet.xlsx"');
+    const wb = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: res });
+    const ws = wb.addWorksheet('Sucessos');
+    ws.columns = [
+      { header: 'codpet', key: 'codpet', width: 16 },
+      { header: 'data_protocolo', key: 'data_protocolo', width: 18 },
+    ];
+    const stmt = db.prepare(`
+      SELECT identificador_peticao, data_protocolo
+      FROM verificacoes 
+      WHERE status_verificacao='Protocolizada' 
+      ORDER BY data_verificacao DESC 
+      LIMIT ?
+    `);
+    for (const r of stmt.iterate(limit)) {
+      const { codpet } = splitCods(r.identificador_peticao);
+      const dp = fmtProtocolDate(r.data_protocolo);
+      ws.addRow({ codpet: String(codpet || ''), data_protocolo: String(dp || '') }).commit();
+    }
+    await wb.commit();
+    res.end();
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -407,27 +707,37 @@ function nodeBackupReset() {
   initDB();
   return backupPath;
 }
-function spawnWorkerDetached(batchId = "") {
+async function spawnWorkerDetached(batchId = "") {
   const script = path.resolve(__dirname, "..", "verificador_peticoes", "src", "worker.py");
   const pyCwd = path.resolve(__dirname, "..", "verificador_peticoes");
   let child;
   const workerId = `w-${Date.now().toString(36)}-${Math.random().toString(16).slice(2,6)}`;
   const opts = { detached: true, stdio: "ignore", windowsHide: true, cwd: pyCwd, env: { ...process.env, WORKER_ID: workerId } };
   const args = batchId ? [script, "--batch", batchId] : [script];
+  // Hard guard: do not spawn if any worker process exists
+  try {
+    const procs = await listActiveRobots();
+    const hasWorkerProc = !!procs.find(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+    if (hasWorkerProc) return false;
+  } catch {}
+  try { if (batchId) db.prepare("UPDATE execucoes SET status='starting' WHERE batch_id=? AND finalizado_em IS NULL").run(batchId); } catch {}
   try { child = spawn("pythonw", args, opts); } catch {}
   if (!child) { try { child = spawn("py", ["-3", ...args], opts); } catch {} }
   if (!child) { try { child = spawn("python", args, opts); } catch {} }
   if (!child) { try { child = spawn("python3", args, opts); } catch {} }
-  if (!child) return false;
-  child.unref();
+  if (!child) {
+    try { if (batchId) db.prepare("UPDATE execucoes SET status='queued' WHERE batch_id=? AND finalizado_em IS NULL").run(batchId); } catch {}
+    return false;
+  }
+  try { child.unref(); } catch {}
   return true;
 }
 
-function spawnWorkersForBatch(batchId, robots = 1) {
-  const n = Math.max(1, Math.min(robots || 1, 10));
+async function spawnWorkersForBatch(batchId, robots = 1) {
+  const n = 1;
   let okAny = false;
   for (let i = 0; i < n; i++) {
-    const ok = spawnWorkerDetached(batchId);
+    const ok = await spawnWorkerDetached(batchId);
     okAny = okAny || ok;
   }
   return okAny;
@@ -447,7 +757,7 @@ app.post("/enqueue", (req, res) => {
     const host = process.env.COMPUTERNAME || process.env.HOSTNAME || "";
     let modo = String(req.body.mode || '').toLowerCase();
     if (modo !== 'visible') modo = 'headless';
-    const robots = Math.max(1, parseInt(String(req.body.robots || '1'), 10) || 1);
+    const robots = 1;
     db.prepare("INSERT OR REPLACE INTO execucoes (batch_id, iniciado_em, usuario_projudi, navegador_modo, host_execucao, total_arquivos, status, progress) VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, 'queued', 0)")
       .run(batch, usuario, modo, host, files.length);
     if (usuarioSel) {
@@ -459,7 +769,7 @@ app.post("/enqueue", (req, res) => {
         }
       } catch {}
     }
-    try { db.prepare("UPDATE execucoes SET max_robots=? WHERE batch_id=?").run(robots, batch); } catch {}
+    try { db.prepare("UPDATE execucoes SET max_robots=1 WHERE batch_id=?").run(batch); } catch {}
     const stmt = db.prepare("INSERT INTO job_items (batch_id, nome_arquivo, numero_processo, identificador, status, mensagem) VALUES (?, ?, ?, ?, 'pending', '')");
     let inserted = 0;
     for (const f of files) {
@@ -469,7 +779,6 @@ app.post("/enqueue", (req, res) => {
       stmt.run(batch, s, numero_processo, identificador);
       inserted++;
     }
-    try { spawnWorkersForBatch(batch, robots); } catch {}
     res.json({ ok: true, batch_id: batch, count: inserted });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
@@ -514,9 +823,30 @@ app.post("/jobs/:batch/finalize", (req, res) => {
   }
 });
 
-app.post("/start-worker", (req, res) => {
+app.post("/start-worker", async (req, res) => {
   try {
-    const ok = spawnWorkerDetached();
+    const batchId = String(req.query.batch || (req.body && req.body.batch) || '').trim();
+    const procs = await listActiveRobots();
+    const hasWorkerProc = !!procs.find(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+    if (hasWorkerProc) return res.json({ ok: true });
+    const active = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status IN ('starting','running') AND finalizado_em IS NULL").get().c;
+    if (active > 0) return res.json({ ok: true });
+    if (batchId) {
+      try {
+        const row = db.prepare("SELECT status FROM execucoes WHERE batch_id=?").get(batchId);
+        const st = String((row && row.status) || '').toLowerCase();
+        if (st === 'running' || st === 'starting') return res.json({ ok: true });
+      } catch {}
+      const ok = await spawnWorkerDetached(batchId);
+      if (!ok) return res.status(500).json({ ok: false, error: "Falha ao iniciar Python" });
+      return res.json({ ok: true });
+    }
+    const runAny = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status IN ('starting','running') AND finalizado_em IS NULL").get().c;
+    if (runAny > 0) return res.json({ ok: true });
+    const nxt = db.prepare("SELECT batch_id FROM execucoes WHERE status='queued' AND finalizado_em IS NULL ORDER BY iniciado_em ASC LIMIT 1").get();
+    const bid = nxt && nxt.batch_id ? String(nxt.batch_id) : '';
+    if (!bid) return res.json({ ok: true });
+    const ok = await spawnWorkerDetached(bid);
     if (!ok) return res.status(500).json({ ok: false, error: "Falha ao iniciar Python" });
     res.json({ ok: true });
   } catch (e) {
@@ -526,12 +856,9 @@ app.post("/start-worker", (req, res) => {
 
 function markBatchTimeout(batch) {
   try {
-    db.prepare("UPDATE job_items SET status='failed', mensagem='Timeout 60s' WHERE batch_id=? AND status IN ('pending','running')").run(batch);
+    db.prepare("UPDATE job_items SET status='failed', mensagem='Timeout 900s' WHERE batch_id=? AND status IN ('pending','running')").run(batch);
     db.prepare("UPDATE execucoes SET status='error', finalizado_em=CURRENT_TIMESTAMP WHERE batch_id=?").run(batch);
-    db.prepare("INSERT INTO logs_verificacao (nivel,mensagem,detalhes,batch_id) VALUES ('ERROR','Timeout do worker >60s','watchdog', ?)").run(batch);
-    const pend = db.prepare("SELECT COUNT(*) as c FROM job_items WHERE status='pending'").get().c;
-    const running = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status='running' AND finalizado_em IS NULL").get().c;
-    if (pend > 0 && running === 0) { try { spawnWorkerDetached(); } catch {} }
+    db.prepare("INSERT INTO logs_verificacao (nivel,mensagem,detalhes,batch_id) VALUES ('ERROR','Timeout do worker >900s','watchdog', ?)").run(batch);
   } catch {}
 }
 
@@ -542,28 +869,15 @@ function watchdog() {
     for (const r of rowsRun) {
       const lastLog = db.prepare("SELECT strftime('%s', MAX(timestamp)) as ts FROM logs_verificacao WHERE batch_id=?").get(r.batch_id);
       const ts = Math.max(Number(r.hb || 0), Number((lastLog && lastLog.ts) || 0));
-      if (!ts || now - ts > 60) { markBatchTimeout(r.batch_id); }
+      if (!ts || now - ts > 900) { markBatchTimeout(r.batch_id); }
     }
-    const rowsQueued = db.prepare("SELECT batch_id, strftime('%s', iniciado_em) as st FROM execucoes WHERE status='queued' AND finalizado_em IS NULL").all();
-    for (const r of rowsQueued) {
-      const ts = Number(r.st || 0);
-      if (ts && now - ts > 60) { markBatchTimeout(r.batch_id); }
-    }
+    // não marcar queued como timeout; robô paciente
   } catch {}
 }
 
 setInterval(watchdog, 5000);
 
-function ensureWorker() {
-  try {
-    const running = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status='running' AND finalizado_em IS NULL").get().c;
-    const pend = db.prepare("SELECT COUNT(*) as c FROM job_items WHERE status='pending'").get().c;
-    const queued = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status='queued' AND finalizado_em IS NULL").get().c;
-    if (running === 0 && (pend > 0 || queued > 0)) { try { spawnWorkerDetached(); } catch {} }
-  } catch {}
-}
-
-setInterval(ensureWorker, 10000);
+ 
 
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -582,3 +896,31 @@ app.post("/backup-reset", (req, res) => {
 
 const PORT = process.env.PORT || 3745;
 app.listen(PORT, () => { console.log(`http://localhost:${PORT}/`) })
+
+// Scheduler conservador: usa estado do banco para evitar múltiplos workers simultâneos
+setInterval(async () => {
+  try {
+    const procs = await listActiveRobots();
+    const hasWorkerProc = !!procs.find(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+    if (hasWorkerProc) return;
+    const runAny = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status IN ('starting','running') AND finalizado_em IS NULL").get().c;
+    if (runAny > 0) return;
+    const nxt = db.prepare("SELECT batch_id, COALESCE(max_robots,1) as max_robots FROM execucoes WHERE status='queued' AND finalizado_em IS NULL ORDER BY iniciado_em ASC LIMIT 1").get();
+    const bid = nxt && nxt.batch_id ? String(nxt.batch_id) : '';
+    if (!bid) return;
+    try { await spawnWorkerDetached(bid); } catch {}
+  } catch {}
+}, 8000);
+async function enforceSingleWorkerProc() {
+  try {
+    const rows = await listActiveRobots();
+    const workers = rows.filter(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+    if (workers.length > 1) {
+      const keep = workers[0];
+      const toKill = workers.slice(1).map(r => r.pid);
+      await killPIDs(toKill);
+    }
+  } catch {}
+}
+
+setInterval(enforceSingleWorkerProc, 5000);

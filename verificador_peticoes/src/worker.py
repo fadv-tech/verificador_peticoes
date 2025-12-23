@@ -36,6 +36,8 @@ def run():
         batch_limit = None
     while True:
         pendentes = db.obter_itens_pendentes(batch_id=batch_limit) if batch_limit else db.obter_itens_pendentes()
+        if batch_limit and not pendentes:
+            pendentes = db.obter_itens_pendentes()
         if not pendentes:
             time.sleep(2)
             continue
@@ -66,43 +68,88 @@ def run():
                 ok = extrator.configurar_driver(headless=headless)
                 if not ok:
                     for it in itens:
-                        db.atualizar_item_status(it['id'], 'failed', 'Falha ao configurar navegador')
+                        db.registrar_falha_transiente(it['id'], 'Falha ao configurar navegador')
                     batch_logger.error("Falha ao configurar navegador para o batch")
                     continue
                 ok = extrator.realizar_login(usuario, senha)
                 if not ok:
                     for it in itens:
-                        db.atualizar_item_status(it['id'], 'failed', 'Falha no login')
+                        db.registrar_falha_transiente(it['id'], 'Falha no login')
                     extrator.fechar_driver()
                     batch_logger.error("Falha no login")
                     continue
+                progress_last = int(exec_info.get('progress') or 0)
+                hb_loops = 0
                 for it in itens:
                     db.atualizar_execucao_heartbeat(batch_id)
                     batch_logger.info("heartbeat")
-                    if not db.tentar_iniciar_item(it['id']):
+                    cur_exec = db.obter_execucao_por_batch(batch_id) or {}
+                    cur_progress = int(cur_exec.get('progress') or 0)
+                    if cur_progress == progress_last:
+                        hb_loops += 1
+                    else:
+                        hb_loops = 0
+                        progress_last = cur_progress
+                    if hb_loops >= 10:
+                        try:
+                            extrator.fechar_driver()
+                        except Exception:
+                            pass
+                        db.resetar_itens_stuck(batch_id)
+                        db.atualizar_execucao_status(batch_id, 'queued')
+                        batch_logger.warning("Watchdog: loop de heartbeat detectado; robôs reiniciados")
+                        break
+                    if not db.tentar_iniciar_item(it['id'], batch_id):
                         continue
                     numero = it.get('numero_processo','')
                     ident = it.get('identificador','')
                     r = extrator.verificar_protocolizacao(numero, ident)
                     status = "Protocolizada" if r.get('encontrado') else "Não encontrada"
+                    dp = str(r.get('data_protocolo') or '').strip()
+                    if dp:
+                        try:
+                            dp = dp.replace('.', '/').strip()
+                            import re
+                            m = re.match(r'^(\d{2})/(\d{2})/(\d{4})$', dp)
+                            if m:
+                                dd = int(m.group(1)); mm = int(m.group(2))
+                                if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+                                    dp = ''
+                            else:
+                                dp = ''
+                        except Exception:
+                            pass
+                    detalhes = r.get("mensagem", "")
+                    if status == "Protocolizada" and not dp:
+                        status = "Não encontrada"
+                    if status == "Protocolizada" and dp:
+                        detalhes = f"{detalhes} — Protocolada em {dp}"
                     db.registrar_verificacao(
                         numero,
                         ident or "",
                         it.get('nome_arquivo',''),
                         status,
                         r.get("nome_documento", ""),
-                        r.get("mensagem", ""),
+                        detalhes,
+                        dp,
                         usuario_projudi=usuario,
                         navegador_modo=modo,
                         host_execucao=os.environ.get("COMPUTERNAME", "") or os.environ.get("HOSTNAME", ""),
-                        batch_id=batch_id
+                        batch_id=batch_id,
+                        item_id=int(it.get('id') or 0)
                     )
                     db.atualizar_item_status(it['id'], 'done', status)
                     db.incrementar_progresso(batch_id, 1)
                 extrator.fechar_driver()
-                cont = db.contar_status_por_batch(batch_id)
-                db.finalizar_execucao(batch_id, cont['protocolizadas'], cont['nao_encontradas'])
-                batch_logger.info("Batch finalizado")
+                try:
+                    if not db.existe_itens_em_andamento(batch_id):
+                        cont = db.contar_status_por_batch(batch_id)
+                        db.finalizar_execucao(batch_id, cont['protocolizadas'], cont['nao_encontradas'])
+                        batch_logger.info("Batch finalizado")
+                    else:
+                        db.atualizar_execucao_status(batch_id, 'queued')
+                except Exception:
+                    pass
             finally:
                 batch_logger.removeHandler(h)
         time.sleep(1)

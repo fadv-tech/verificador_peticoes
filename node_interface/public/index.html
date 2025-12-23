@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verificador Projudi - Dashboard</title>
+    <link rel="stylesheet" href="/styles.css?v=2" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+  </head>
+  <body>
+    <header>
+      <h1>Verificador de Petições - Dashboard</h1>
+      <div id="summary"></div>
+      <div class="actions">
+        <button id="startWorker">Iniciar worker (background)</button>
+        <button id="refreshAll">Atualizar</button>
+      </div>
+    </header>
+
+    <!-- Navegação por abas moderna -->
+    <nav class="tab-navigation">
+      <div class="tabs" id="mainTabs">
+        <div class="tab active" data-tab="gerenciamento">Gerenciamento de Bateladas</div>
+        <div class="tab" data-tab="sucessos">Logs de Sucesso</div>
+        <div class="tab" data-tab="insucessos">Logs de Insucesso</div>
+        <div class="tab" data-tab="configuracoes">Configurações</div>
+        <div class="tab" data-tab="sistema">Sistema</div>
+        <div class="tab" data-tab="logsrt">Logs em Tempo Real</div>
+      </div>
+    </nav>
+
+    <main>
+      <!-- Aba 1: Gerenciamento de Bateladas -->
+      <div id="tab-gerenciamento" class="tab-content active">
+        <section class="card">
+          <details id="snapshotsPanel">
+            <summary>Prints em tempo real</summary>
+            <div id="snapshots" class="snapshots"></div>
+          </details>
+        </section>
+        <section class="card">
+          <h2>Nova batelada</h2>
+          <p>Cole os nomes dos arquivos (um por linha):</p>
+          <textarea id="filesInput" rows="8" placeholder="5188032.43.2019.8.09.0152_9565_56790_Manifestação.pdf"></textarea>
+          <div class="row">
+            <button id="enqueueBtn">Enfileirar</button>
+            <label style="margin-left:8px;font-size:12px;color:var(--muted)">Navegador:</label>
+            <select id="headlessSelect" style="margin-left:4px">
+              <option value="headless" selected>Headless</option>
+              <option value="visible">Visível</option>
+            </select>
+            <label style="margin-left:12px;font-size:12px;color:var(--muted)">Usuário:</label>
+            <select id="usuarioSelect" style="margin-left:4px"></select>
+            <span style="margin-left:12px;font-size:12px;color:var(--muted)">Concorrência fixa: 1 robô</span>
+            <span id="enqueueStatus"></span>
+          </div>
+        </section>
+        <section class="card">
+          <h2>Execuções</h2>
+          <table id="jobsTable">
+            <thead>
+              <tr>
+                <th>Batch</th>
+                <th>Início</th>
+                <th>Status</th>
+                <th>Processos enviados</th>
+                <th>Analisados</th>
+                <th>Itens pendentes</th>
+                <th>Itens execução</th>
+                <th>Itens concluídos</th>
+                <th>Itens falha</th>
+                <th>Progresso</th>
+                <th>Usuário</th>
+                <th>Navegador</th>
+                <th>Host</th>
+                <th>Protocolizadas</th>
+                <th>Não protocolizadas</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+        <section class="card">
+          <h2>Detalhes da execução</h2>
+          <div class="row">
+            <input id="batchSelect" placeholder="batch_id" />
+            <button id="loadBatch">Carregar</button>
+          </div>
+          <div>
+            <h3>Itens</h3>
+            <table id="itemsTable">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Arquivo</th>
+                  <th>Processo</th>
+                  <th>Identificador</th>
+                  <th>Status</th>
+                  <th>Mensagem</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div>
+            <table id="resultsTable">
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th>Processo</th>
+                  <th>Identificador</th>
+                  <th>Arquivo</th>
+                  <th>Status</th>
+                  <th>Documento</th>
+                  <th>Data Protocolo</th>
+                  <th>Mensagem</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- Aba 2: Logs de Sucesso -->
+      <div id="tab-sucessos" class="tab-content">
+        <section class="card">
+          <h2>Sucessos (com data de verificação)</h2>
+          <div class="row" style="margin-bottom:8px">
+            <button id="successRefresh">Atualizar</button>
+            <button id="successExport">Exportar CSV</button>
+            <button id="successExportXlsx">Exportar XLSX (codpet + data)</button>
+            <span id="successStatus" style="margin-left:8px;color:var(--muted)"></span>
+          </div>
+          <table id="successTable">
+            <thead>
+              <tr>
+                <th>Data Verificação</th>
+                <th>Processo</th>
+                <th>codproc</th>
+                <th>codpet</th>
+                <th>Identificador</th>
+                <th>Arquivo</th>
+                <th>Data Protocolo</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+        <section class="card">
+          <details id="recentPanel">
+            <summary>Resultados recentes</summary>
+            <div class="row" style="margin:8px 0">
+              <label style="font-size:12px;color:var(--muted)">Período:</label>
+              <select id="recentFilter" style="margin-left:6px">
+                <option value="all" selected>Todos</option>
+                <option value="today">Hoje</option>
+                <option value="7d">Últimos 7 dias</option>
+                <option value="30d">Últimos 30 dias</option>
+              </select>
+            </div>
+            <table id="recentResultsTable">
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th>Processo</th>
+                  <th>Identificador</th>
+                  <th>Arquivo</th>
+                  <th>Status</th>
+                  <th>Documento</th>
+                  <th>Data Protocolo</th>
+                  <th>Mensagem</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </details>
+        </section>
+      </div>
+
+      <div id="tab-insucessos" class="tab-content">
+        <section class="card">
+          <h2>Insucessos</h2>
+          <div class="row" style="margin-bottom:8px">
+            <button id="failuresRefresh">Atualizar</button>
+            <button id="failuresEnqueue">Criar batelada com selecionados</button>
+            <label style="margin-left:8px;font-size:12px;color:var(--muted)"><input type="checkbox" id="failureSelectAll" /> Selecionar todos</label>
+            <span id="failuresStatus" style="margin-left:8px;color:var(--muted)"></span>
+          </div>
+          <table id="failureTable">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Data Verificação</th>
+                <th>Processo</th>
+                <th>Identificador</th>
+                <th>Arquivo</th>
+                <th>Status</th>
+                <th>Mensagem</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </div>
+
+      <!-- Aba 5: Logs em Tempo Real -->
+      <div id="tab-logsrt" class="tab-content">
+        <section class="card">
+          <h2>Logs em Tempo Real</h2>
+          <div class="row" style="margin-bottom:8px">
+            <input id="rtBatchSelect" placeholder="batch_id" />
+            <button id="rtConnect">Conectar</button>
+            <span id="rtStatus" style="margin-left:8px;color:var(--muted)"></span>
+          </div>
+          <div id="logsTabs" class="tabs"></div>
+          <table id="logsTable">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Nível</th>
+                <th>Mensagem</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </div>
+
+      <!-- Aba 3: Configurações -->
+      <div id="tab-configuracoes" class="tab-content">
+        <section class="card">
+          <h2>Configurações de Usuário</h2>
+          <div class="row">
+            <label style="width:100px">Usuário</label>
+            <input id="cfgUser" type="text" placeholder="CPF/Usuário" style="flex:1" />
+          </div>
+          <div class="row">
+            <label style="width:100px">Senha</label>
+            <input id="cfgPass" type="password" placeholder="Senha" style="flex:1" />
+          </div>
+          <div class="row">
+            <button id="saveCredsBtn">Salvar credenciais</button>
+            <span id="saveCredsStatus"></span>
+          </div>
+        </section>
+      </div>
+
+      <!-- Aba 4: Sistema -->
+      <div id="tab-sistema" class="tab-content">
+        <section class="card">
+          <h2>Robôs ativos</h2>
+          <div class="row">
+            <button id="robotsRefresh">Atualizar</button>
+            <button id="robotsKillAgg">Finalizar agressivo</button>
+            <button id="robotsKillWorkers">Finalizar workers</button>
+            <label style="margin-left:8px;font-size:12px;color:var(--muted)"><input type="checkbox" id="robotsAuto" checked /> Atualização automática (10s)</label>
+            <span id="robotsStatus"></span>
+          </div>
+          <table id="robotsTable">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Nome</th>
+                <th>Comando</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+        <section class="card">
+          <h2>Manutenção</h2>
+          <div class="row">
+            <button id="backupResetBtn" disabled>Backup e limpar banco</button>
+            <span id="backupStatus"></span>
+          </div>
+          <p style="color:var(--muted);font-size:12px">Desativado enquanto houver execução em andamento</p>
+        </section>
+        <section class="card">
+          <details id="snapshotsPanel">
+            <summary>Prints em tempo real</summary>
+            <div id="snapshots" class="snapshots"></div>
+          </details>
+        </section>
+      </div>
+    </main>
+
+    <script src="/app.js?v=2"></script>
+  </body>
+  </html>

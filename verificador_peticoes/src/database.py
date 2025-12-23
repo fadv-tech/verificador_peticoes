@@ -29,6 +29,7 @@ class DatabaseManager:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS verificacoes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER,
                     numero_processo TEXT NOT NULL,
                     identificador_peticao TEXT NOT NULL,
                     nome_arquivo_original TEXT NOT NULL,
@@ -36,7 +37,11 @@ class DatabaseManager:
                     peticao_encontrada TEXT,
                     data_verificacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     detalhes TEXT,
-                    UNIQUE(numero_processo, identificador_peticao)
+                    data_protocolo TEXT,
+                    usuario_projudi TEXT DEFAULT '',
+                    navegador_modo TEXT DEFAULT '',
+                    host_execucao TEXT DEFAULT '',
+                    batch_id TEXT DEFAULT ''
                 )
             ''')
             
@@ -80,7 +85,8 @@ class DatabaseManager:
                     status TEXT DEFAULT 'pending',
                     mensagem TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP
+                    updated_at TIMESTAMP,
+                    fail_count INTEGER DEFAULT 0
                 )
             ''')
 
@@ -117,6 +123,44 @@ class DatabaseManager:
                     cursor.execute("ALTER TABLE verificacoes ADD COLUMN host_execucao TEXT DEFAULT ''")
                 if 'batch_id' not in cols:
                     cursor.execute("ALTER TABLE verificacoes ADD COLUMN batch_id TEXT DEFAULT ''")
+                if 'data_protocolo' not in cols:
+                    cursor.execute("ALTER TABLE verificacoes ADD COLUMN data_protocolo TEXT")
+                if 'item_id' not in cols:
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS verificacoes_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            item_id INTEGER,
+                            numero_processo TEXT NOT NULL,
+                            identificador_peticao TEXT NOT NULL,
+                            nome_arquivo_original TEXT NOT NULL,
+                            status_verificacao TEXT NOT NULL,
+                            peticao_encontrada TEXT,
+                            data_verificacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            detalhes TEXT,
+                            data_protocolo TEXT,
+                            usuario_projudi TEXT DEFAULT '',
+                            navegador_modo TEXT DEFAULT '',
+                            host_execucao TEXT DEFAULT '',
+                            batch_id TEXT DEFAULT ''
+                        )
+                    ''')
+                    cursor.execute('''
+                        INSERT INTO verificacoes_new (id, numero_processo, identificador_peticao, nome_arquivo_original, status_verificacao, peticao_encontrada, data_verificacao, detalhes, data_protocolo, usuario_projudi, navegador_modo, host_execucao, batch_id)
+                        SELECT id, numero_processo, identificador_peticao, nome_arquivo_original, status_verificacao, peticao_encontrada, data_verificacao, detalhes, data_protocolo, COALESCE(usuario_projudi,''), COALESCE(navegador_modo,''), COALESCE(host_execucao,''), COALESCE(batch_id,'') FROM verificacoes
+                    ''')
+                    cursor.execute('DROP TABLE verificacoes')
+                    cursor.execute('ALTER TABLE verificacoes_new RENAME TO verificacoes')
+            except Exception:
+                pass
+
+            # Migração para job_items: garantir colunas ausentes
+            try:
+                cursor.execute("PRAGMA table_info(job_items)")
+                cols = {row[1] for row in cursor.fetchall()}
+                if 'updated_at' not in cols:
+                    cursor.execute("ALTER TABLE job_items ADD COLUMN updated_at TIMESTAMP")
+                if 'fail_count' not in cols:
+                    cursor.execute("ALTER TABLE job_items ADD COLUMN fail_count INTEGER DEFAULT 0")
             except Exception:
                 pass
 
@@ -139,6 +183,11 @@ class DatabaseManager:
                     cursor.execute("ALTER TABLE execucoes ADD COLUMN progress INTEGER DEFAULT 0")
                 if 'heartbeat_at' not in cols:
                     cursor.execute("ALTER TABLE execucoes ADD COLUMN heartbeat_at TIMESTAMP")
+                if 'max_robots' not in cols:
+                    try:
+                        cursor.execute("ALTER TABLE execucoes ADD COLUMN max_robots INTEGER DEFAULT 1")
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -146,19 +195,19 @@ class DatabaseManager:
     
     def registrar_verificacao(self, numero_processo: str, identificador_peticao: str, 
                             nome_arquivo: str, status: str, peticao_encontrada: str = None, 
-                            detalhes: str = None, usuario_projudi: str = '', navegador_modo: str = '',
-                            host_execucao: str = '', batch_id: str = '') -> int:
+                            detalhes: str = None, data_protocolo: str = '', usuario_projudi: str = '', navegador_modo: str = '',
+                            host_execucao: str = '', batch_id: str = '', item_id: int = 0) -> int:
         """Registra uma verificação no banco de dados"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT OR REPLACE INTO verificacoes 
-                    (numero_processo, identificador_peticao, nome_arquivo_original, 
-                     status_verificacao, peticao_encontrada, detalhes, usuario_projudi, navegador_modo, host_execucao, batch_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (numero_processo, identificador_peticao, nome_arquivo, 
-                      status, peticao_encontrada, detalhes, usuario_projudi, navegador_modo, host_execucao, batch_id))
+                    INSERT INTO verificacoes 
+                    (item_id, numero_processo, identificador_peticao, nome_arquivo_original, 
+                     status_verificacao, peticao_encontrada, detalhes, data_protocolo, usuario_projudi, navegador_modo, host_execucao, batch_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (item_id, numero_processo, identificador_peticao, nome_arquivo, 
+                      status, peticao_encontrada, detalhes, data_protocolo, usuario_projudi, navegador_modo, host_execucao, batch_id))
                 conn.commit()
                 return cursor.lastrowid
         except Exception as e:
@@ -517,11 +566,19 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Erro ao atualizar status do item {item_id}: {e}")
 
-    def tentar_iniciar_item(self, item_id: int) -> bool:
+    def tentar_iniciar_item(self, item_id: int, batch_id: str) -> bool:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute('UPDATE job_items SET status="running", mensagem="", updated_at=CURRENT_TIMESTAMP WHERE id=? AND status="pending"', (item_id,))
+                cursor.execute('''
+                    UPDATE job_items 
+                    SET status="running", mensagem="", updated_at=CURRENT_TIMESTAMP 
+                    WHERE id=? AND status="pending" 
+                      AND (
+                        (SELECT COUNT(*) FROM job_items WHERE batch_id=? AND status='running')
+                      ) < COALESCE((SELECT max_robots FROM execucoes WHERE batch_id=?), 1)
+                      AND COALESCE(fail_count,0) < 2
+                ''', (item_id, batch_id, batch_id))
                 conn.commit()
                 return cursor.rowcount > 0
         except Exception as e:
@@ -576,6 +633,52 @@ class DatabaseManager:
                 conn.commit()
         except Exception as e:
             logging.error(f"Erro ao incrementar progresso da execução {batch_id}: {e}")
+
+    def existe_itens_em_andamento(self, batch_id: str) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM job_items WHERE batch_id=? AND status IN ("pending","running")', (batch_id,))
+                row = cursor.fetchone()
+                return bool(row and int(row[0]) > 0)
+        except Exception as e:
+            logging.error(f"Erro ao verificar itens em andamento para {batch_id}: {e}")
+            return True
+
+    def resetar_itens_stuck(self, batch_id: str) -> int:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('UPDATE job_items SET status="pending", mensagem="Reset após loop de heartbeat", updated_at=CURRENT_TIMESTAMP WHERE batch_id=? AND status="running"', (batch_id,))
+                total = cursor.rowcount or 0
+                cursor.execute('SELECT id, COALESCE(fail_count,0) FROM job_items WHERE batch_id=? AND status="failed" ORDER BY updated_at DESC LIMIT 1', (batch_id,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    fc = int(row[1] or 0)
+                    if fc < 2:
+                        cursor.execute('UPDATE job_items SET status="pending", mensagem="", updated_at=CURRENT_TIMESTAMP WHERE id=?', (row[0],))
+                        total += 1
+                conn.commit()
+                return int(total)
+        except Exception as e:
+            logging.error(f"Erro ao resetar itens presos do batch {batch_id}: {e}")
+            return 0
+
+    def registrar_falha_transiente(self, item_id: int, mensagem: str = ''):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COALESCE(fail_count,0) FROM job_items WHERE id=?', (item_id,))
+                row = cursor.fetchone()
+                fc = int(row[0]) if row and row[0] is not None else 0
+                fc += 1
+                if fc >= 2:
+                    cursor.execute('UPDATE job_items SET status="failed", mensagem=?, fail_count=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', (mensagem, fc, item_id))
+                else:
+                    cursor.execute('UPDATE job_items SET status="pending", mensagem=?, fail_count=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', (mensagem, fc, item_id))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Erro ao registrar falha transiente do item {item_id}: {e}")
 
 # Configuração de logging
 class LogManager:

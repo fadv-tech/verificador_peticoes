@@ -1,0 +1,68 @@
+Processo: 5821707-47
+Erro: Message: no such element: Unable to locate element: {"method":"css selector","selector":"[name="imaLimparProcessoStatus"]"}
+  (Session info: chrome=142.0.7444.60); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#nosuchelementexception
+Stacktrace:
+Symbols not available. Dumping unresolved backtrace:
+	0x10958d3
+	0x1095914
+	0xeae76d
+	0xefa09d
+	0xefa47b
+	0xf41802
+	0xf1c9b4
+	0xf3eea6
+	0xf1c766
+	0xeedac0
+	0xeeede4
+	0x1317974
+	0x1312bea
+	0x10be5c4
+	0x10add38
+	0x10b4d9d
+	0x109dee8
+	0x109e0ac
+	0x1087d2a
+	0x76815d49
+	0x77c3d6db
+	0x77c3d661
+
+
+Traceback (most recent call last):
+  File "C:\Users\Frede Moura\Pythons\Fredson\Fredson3\prm_gestao\projudi_corrigido.py", line 534, in processar_processo
+    driver.find_element(By.NAME, "imaLimparProcessoStatus").click()
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Frede Moura\AppData\Roaming\Python\Python314\site-packages\selenium\webdriver\remote\webdriver.py", line 926, in find_element
+    return self.execute(Command.FIND_ELEMENT, {"using": by, "value": value})["value"]
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Frede Moura\AppData\Roaming\Python\Python314\site-packages\selenium\webdriver\remote\webdriver.py", line 458, in execute
+    self.error_handler.check_response(response)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\Frede Moura\AppData\Roaming\Python\Python314\site-packages\selenium\webdriver\remote\errorhandler.py", line 233, in check_response
+    raise exception_class(message, screen, stacktrace)
+selenium.common.exceptions.NoSuchElementException: Message: no such element: Unable to locate element: {"method":"css selector","selector":"[name="imaLimparProcessoStatus"]"}
+  (Session info: chrome=142.0.7444.60); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#nosuchelementexception
+Stacktrace:
+Symbols not available. Dumping unresolved backtrace:
+	0x10958d3
+	0x1095914
+	0xeae76d
+	0xefa09d
+	0xefa47b
+	0xf41802
+	0xf1c9b4
+	0xf3eea6
+	0xf1c766
+	0xeedac0
+	0xeeede4
+	0x1317974
+	0x1312bea
+	0x10be5c4
+	0x10add38
+	0x10b4d9d
+	0x109dee8
+	0x109e0ac
+	0x1087d2a
+	0x76815d49
+	0x77c3d6db
+	0x77c3d661
+
