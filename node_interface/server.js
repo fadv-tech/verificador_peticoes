@@ -743,43 +743,84 @@ async function spawnWorkersForBatch(batchId, robots = 1) {
   return okAny;
 }
 
+function createBatch(files, usuarioSel, mode) {
+  if (!files || !files.length) throw new Error("files vazio");
+  const batch = (Math.random().toString(16).slice(2, 10));
+  let usuario = usuarioSel;
+  if (!usuario) {
+    const usuarioRow = db.prepare("SELECT valor FROM config WHERE chave='PROJUDI_USERNAME'").get();
+    usuario = usuarioRow ? usuarioRow.valor : "";
+  }
+  const host = process.env.COMPUTERNAME || process.env.HOSTNAME || "";
+  let modo = String(mode || '').toLowerCase();
+  if (modo !== 'visible') modo = 'headless';
+  
+  db.prepare("INSERT OR REPLACE INTO execucoes (batch_id, iniciado_em, usuario_projudi, navegador_modo, host_execucao, total_arquivos, status, progress) VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, 'queued', 0)")
+    .run(batch, usuario, modo, host, files.length);
+
+  if (usuarioSel) {
+    try {
+      const prow = db.prepare("SELECT senha FROM credenciais WHERE usuario=?").get(usuarioSel);
+      if (prow && prow.senha) {
+        db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_USERNAME', ?)").run(usuarioSel);
+        db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_PASSWORD', ?)").run(prow.senha);
+      }
+    } catch {}
+  }
+  try { db.prepare("UPDATE execucoes SET max_robots=1 WHERE batch_id=?").run(batch); } catch {}
+  const stmt = db.prepare("INSERT INTO job_items (batch_id, nome_arquivo, numero_processo, identificador, status, mensagem) VALUES (?, ?, ?, ?, 'pending', '')");
+  let inserted = 0;
+  for (const f of files) {
+    const s = String(f).trim();
+    if (!s) continue;
+    const { numero_processo, identificador } = parseCNJAndId(s);
+    stmt.run(batch, s, numero_processo, identificador);
+    inserted++;
+  }
+  return { batch_id: batch, count: inserted };
+}
+
 app.post("/enqueue", (req, res) => {
   try {
     const files = Array.isArray(req.body.files) ? req.body.files : [];
-    if (!files.length) return res.status(400).json({ ok: false, error: "files vazio" });
-    const batch = (Math.random().toString(16).slice(2, 10));
     const usuarioSel = String(req.body.usuario || '').trim();
-    let usuario = usuarioSel;
-    if (!usuario) {
-      const usuarioRow = db.prepare("SELECT valor FROM config WHERE chave='PROJUDI_USERNAME'").get();
-      usuario = usuarioRow ? usuarioRow.valor : "";
+    const mode = String(req.body.mode || '');
+    const { batch_id, count } = createBatch(files, usuarioSel, mode);
+    res.json({ ok: true, batch_id, count });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post("/api/v1/batch", async (req, res) => {
+  try {
+    const files = Array.isArray(req.body.files) ? req.body.files : [];
+    const usuarioSel = String(req.body.usuario || '').trim();
+    const mode = String(req.body.mode || '');
+    const { batch_id, count } = createBatch(files, usuarioSel, mode);
+    
+    // Auto-start logic similar to /start-worker
+    // First check if any worker is running (global lock)
+    let workerStarted = false;
+    try {
+      const procs = await listActiveRobots();
+      const hasWorkerProc = !!procs.find(r => String(r.cmd || '').toLowerCase().includes('worker.py'));
+      const active = db.prepare("SELECT COUNT(*) as c FROM execucoes WHERE status IN ('starting','running') AND finalizado_em IS NULL").get().c;
+      
+      if (!hasWorkerProc && active === 0) {
+         workerStarted = await spawnWorkerDetached(batch_id);
+      }
+    } catch (e) {
+      console.error("Failed to auto-start worker:", e);
     }
-    const host = process.env.COMPUTERNAME || process.env.HOSTNAME || "";
-    let modo = String(req.body.mode || '').toLowerCase();
-    if (modo !== 'visible') modo = 'headless';
-    const robots = 1;
-    db.prepare("INSERT OR REPLACE INTO execucoes (batch_id, iniciado_em, usuario_projudi, navegador_modo, host_execucao, total_arquivos, status, progress) VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, 'queued', 0)")
-      .run(batch, usuario, modo, host, files.length);
-    if (usuarioSel) {
-      try {
-        const prow = db.prepare("SELECT senha FROM credenciais WHERE usuario=?").get(usuarioSel);
-        if (prow && prow.senha) {
-          db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_USERNAME', ?)").run(usuarioSel);
-          db.prepare("INSERT OR REPLACE INTO config (chave,valor) VALUES ('PROJUDI_PASSWORD', ?)").run(prow.senha);
-        }
-      } catch {}
-    }
-    try { db.prepare("UPDATE execucoes SET max_robots=1 WHERE batch_id=?").run(batch); } catch {}
-    const stmt = db.prepare("INSERT INTO job_items (batch_id, nome_arquivo, numero_processo, identificador, status, mensagem) VALUES (?, ?, ?, ?, 'pending', '')");
-    let inserted = 0;
-    for (const f of files) {
-      const s = String(f).trim();
-      if (!s) continue;
-      const { numero_processo, identificador } = parseCNJAndId(s);
-      stmt.run(batch, s, numero_processo, identificador);
-      inserted++;
-    }
-    res.json({ ok: true, batch_id: batch, count: inserted });
+    
+    res.json({ 
+      ok: true, 
+      batch_id, 
+      count, 
+      worker_started: workerStarted,
+      message: workerStarted ? "Batch created and worker started" : "Batch created (worker busy or queued)"
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
